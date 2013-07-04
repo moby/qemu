@@ -2302,7 +2302,12 @@ static void load_elf_image(const char *image_name, int image_fd,
     }
 
     load_addr = loaddr;
-    if (ehdr->e_type == ET_DYN) {
+    if (pinterp_name != NULL) {
+        /* This is the main executable.  Make sure that the low
+           address does not conflict with MMAP_MIN_ADDR or the
+           QEMU application itself.  */
+        probe_guest_base(image_name, loaddr, hiaddr);
+    } else if (ehdr->e_type == ET_DYN) {
         /* The image indicates that it can be loaded anywhere.  Find a
            location that can hold the memory space required.  If the
            image is pre-linked, LOADDR will be non-zero.  Since we do
@@ -2314,11 +2319,6 @@ static void load_elf_image(const char *image_name, int image_fd,
         if (load_addr == -1) {
             goto exit_perror;
         }
-    } else if (pinterp_name != NULL) {
-        /* This is the main executable.  Make sure that the low
-           address does not conflict with MMAP_MIN_ADDR or the
-           QEMU application itself.  */
-        probe_guest_base(image_name, loaddr, hiaddr);
     }
     load_bias = load_addr - loaddr;
 
