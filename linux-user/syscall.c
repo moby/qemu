@@ -113,6 +113,13 @@
 #include "qemu.h"
 #include "fd-trans.h"
 
+#ifndef F_SHLCK
+#define F_SHLCK 8
+#endif
+#ifndef F_EXLCK
+#define F_EXLCK 4
+#endif
+
 #ifndef CLONE_IO
 #define CLONE_IO                0x80000000      /* Clone io context */
 #endif
