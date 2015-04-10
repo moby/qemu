@@ -6303,9 +6303,20 @@ static inline abi_long host_to_target_timex(abi_long target_addr,
 }
 
 
-static inline abi_long target_to_host_sigevent(struct sigevent *host_sevp,
+struct host_sigevent {
+    union sigval sigev_value;
+    int sigev_signo;
+    int sigev_notify;
+    union {
+       int _pad[64-sizeof(int) * 2 + sizeof(union sigval)];
+       int _tid;
+    } _sigev_un;
+};
+
+static inline abi_long target_to_host_sigevent(struct sigevent *sevp,
                                                abi_ulong target_addr)
 {
+    struct host_sigevent *host_sevp = (struct host_sigevent *) sevp;
     struct target_sigevent *target_sevp;
 
     if (!lock_user_struct(VERIFY_READ, target_sevp, target_addr, 1)) {
