@@ -25,7 +25,11 @@ extern char safe_syscall_end[];
 static inline void rewind_if_in_safe_syscall(void *puc)
 {
     ucontext_t *uc = puc;
+#if defined(__GLIBC__) || defined(__UCLIBC__)
     unsigned long *pcreg = &uc->uc_mcontext.gp_regs[PT_NIP];
+#else // Musl
+    unsigned long *pcreg = &uc->uc_mcontext.gp_regs[32];
+#endif
 
     if (*pcreg > (uintptr_t)safe_syscall_start
         && *pcreg < (uintptr_t)safe_syscall_end) {

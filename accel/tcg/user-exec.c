@@ -286,6 +286,7 @@ int cpu_signal_handler(int host_signum, void *pinfo,
  */
 #ifdef linux
 /* All Registers access - only for local access */
+#if defined(__GLIBC__) || defined(__UCLIBC__)
 #define REG_sig(reg_name, context)              \
     ((context)->uc_mcontext.regs->reg_name)
 /* Gpr Registers access  */
@@ -303,15 +304,42 @@ int cpu_signal_handler(int host_signum, void *pinfo,
 /* Condition register */
 #define CR_sig(context)                        REG_sig(ccr, context)
 
+#else // Musl
+#define REG_sig(reg_num, context)              \
+    ((context)->uc_mcontext.gp_regs[reg_num])
+/* Gpr Registers access  */
+#define GPR_sig(reg_num, context)              REG_sig(gpr[reg_num], context)
+/* Program counter */
+#define IAR_sig(context)                       REG_sig(32, context)
+/* Machine State Register (Supervisor) */
+#define MSR_sig(context)                       REG_sig(33, context)
+/* Count register */
+#define CTR_sig(context)                       REG_sig(35, context)
+/* User's integer exception register */
+#define XER_sig(context)                       REG_sig(37, context)
+/* Link register */
+#define LR_sig(context)                        REG_sig(36, context)
+/* Condition register */
+#define CR_sig(context)                        REG_sig(38, context)
+#endif
+
+
 /* Float Registers access  */
 #define FLOAT_sig(reg_num, context)                                     \
     (((double *)((char *)((context)->uc_mcontext.regs + 48 * 4)))[reg_num])
 #define FPSCR_sig(context) \
     (*(int *)((char *)((context)->uc_mcontext.regs + (48 + 32 * 2) * 4)))
 /* Exception Registers access */
+#if defined(__GLIBC__) || defined(__UCLIBC__)
 #define DAR_sig(context)                       REG_sig(dar, context)
 #define DSISR_sig(context)                     REG_sig(dsisr, context)
 #define TRAP_sig(context)                      REG_sig(trap, context)
+#else // Musl
+#define DAR_sig(context)                       REG_sig(41, context)
+#define DSISR_sig(context)                     REG_sig(42, context)
+#define TRAP_sig(context)                      REG_sig(40, context)
+#endif
+
 #endif /* linux */
 
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
