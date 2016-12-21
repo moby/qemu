@@ -26,6 +26,10 @@
 #include "migration/blocker.h"
 #include "sysemu/qtest.h"
 
+#ifdef __linux__
+#include <linux/limits.h> /* for XATTR_SIZE_MAX */
+#endif
+
 int open_fd_hw;
 int total_open_fd;
 static int open_fd_rc;
