@@ -54,6 +54,7 @@
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
 #include <linux/errqueue.h>
+#include <linux/sockios.h>
 #include <linux/random.h>
 #include "qemu-common.h"
 #ifdef CONFIG_TIMERFD
