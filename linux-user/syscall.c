@@ -57,6 +57,7 @@
 #include <linux/icmpv6.h>
 #include <linux/errqueue.h>
 #include <linux/random.h>
+#include "qemu-common.h"
 #ifdef CONFIG_TIMERFD
 #include <sys/timerfd.h>
 #endif
@@ -317,6 +318,10 @@ _syscall3(int, getrandom, void *, buf, size_t, buflen, unsigned int, flags)
 #if defined(TARGET_NR_kcmp) && defined(__NR_kcmp)
 _syscall5(int, kcmp, pid_t, pid1, pid_t, pid2, int, type,
           unsigned long, idx1, unsigned long, idx2)
+#endif
+
+#if defined(TARGET_NR_pivot_root)
+_syscall2(int, pivot_root, const char *, new_root, const char *, put_old)
 #endif
 
 /*
@@ -796,6 +801,7 @@ safe_syscall5(int, mq_timedsend, int, mqdes, const char *, msg_ptr,
 safe_syscall5(int, mq_timedreceive, int, mqdes, char *, msg_ptr,
               size_t, len, unsigned *, prio, const struct timespec *, timeout)
 #endif
+
 /* We do ioctl like this rather than via safe_syscall3 to preserve the
  * "third argument might be integer or pointer or not present" behaviour of
  * the libc function.
@@ -7898,6 +7904,20 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(setpgid(arg1, arg2));
     case TARGET_NR_umask:
         return get_errno(umask(arg1));
+    case TARGET_NR_pivot_root:
+	{
+            void *p2;
+            p  = lock_user_string(arg1);
+            p2 = lock_user_string(arg2);
+            if (!p || !p2) {
+                ret = -TARGET_EFAULT;
+            } else {
+                ret = get_errno(pivot_root(p, p2));
+            }
+            unlock_user(p2, arg2, 0);
+            unlock_user(p, arg1, 0);
+        }
+        return ret;
     case TARGET_NR_chroot:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
