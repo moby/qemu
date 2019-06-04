@@ -324,6 +324,11 @@ _syscall5(int, kcmp, pid_t, pid1, pid_t, pid2, int, type,
 _syscall2(int, pivot_root, const char *, new_root, const char *, put_old)
 #endif
 
+#if defined(TARGET_NR_keyctl)
+_syscall5(long, keyctl, int, operation, __kernel_ulong_t, arg2,
+          __kernel_ulong_t, arg3, __kernel_ulong_t, arg4, __kernel_ulong_t, arg5)
+#endif
+
 /*
  * It is assumed that struct statx is architecture independent.
  */
@@ -11970,6 +11975,31 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_swapcontext:
         /* PowerPC specific.  */
         return do_swapcontext(cpu_env, arg1, arg2, arg3);
+#endif
+
+#ifdef TARGET_NR_memfd_create
+    case TARGET_NR_memfd_create:
+        {
+            p  = lock_user_string(arg1);
+            if (!p) {
+                ret = -TARGET_EFAULT;
+            } else {
+                ret = get_errno(memfd_create(p, (unsigned int) arg2));
+            }
+            unlock_user(p, arg1, 0);
+        }
+        return ret;
+#endif
+
+#ifdef TARGET_NR_copy_file_range
+    case TARGET_NR_copy_file_range:
+    	// TODO(docker)
+    	return -TARGET_EINVAL;
+#endif
+
+#ifdef TARGET_NR_keyctl
+    case TARGET_NR_keyctl:
+        return get_errno(keyctl(arg1, arg2, arg3, arg4, arg5));
 #endif
 
     default:
