@@ -5781,7 +5781,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         }
 
         /* We can't support custom termination signals */
-        if ((flags & CSIGNAL) != TARGET_SIGCHLD) {
+        if (flags && ((flags & CSIGNAL) != TARGET_SIGCHLD)) {
             return -TARGET_EINVAL;
         }
 
