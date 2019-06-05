@@ -114,6 +114,10 @@
 #include "qapi/error.h"
 #include "fd-trans.h"
 
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+#include <string.h>
+#endif
+
 #ifndef CLONE_IO
 #define CLONE_IO                0x80000000      /* Clone io context */
 #endif
@@ -7518,6 +7522,56 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
             if (!(p = lock_user_string(arg1)))
                 goto execve_efault;
+
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+            /* We need to handle specially the case where the process
+             * tries to exec /proc/self/exe because the latter does not
+             * map to the target process but to QEMU.
+             * Here, we can assume that QEMU was run through binfmt
+             * with the P (preserve argv0) option.
+             *
+             * So we set the execve path to one past the first 0 byte
+             * in cmdline.
+             */
+            if (is_proc_myself(p, "exe")) {
+                int fd = open("/proc/self/cmdline", O_RDONLY);
+                if (fd < 0) {
+                    goto execve_efault_cleanup;
+                } 
+
+                /*
+                 * we assume cmdline fits within buf but also check for cases
+                 * where it doesn't
+                 */
+                char buf[1024];
+                int rc = read(fd, buf, sizeof(buf));
+                if (rc <= 0) {
+                    close(fd);
+                    goto execve_efault_cleanup;
+                }
+
+                /*
+                 * if we can still read from /proc/self/cmdline, it means the
+                 * cmdline was larger than buf so we error out
+                 */
+                uint8_t one;
+                if (read(fd, &one, 1) != 0) {
+                    close(fd);
+                    goto execve_efault_cleanup;
+                }
+                close(fd);
+
+                /*
+                 * buf[rc-1] is guaranteed to be \0 at this point.
+                 */
+                for (int i=0; i < rc-1; i++) {
+                    if (!buf[i]) {
+                        p = &buf[i+1];
+                        break;
+                    }
+                }
+            }
+#endif
             /* Although execve() is not an interruptible syscall it is
              * a special case where we must use the safe_syscall wrapper:
              * if we allow a signal to happen before we make the host
@@ -7532,6 +7586,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             unlock_user(p, arg1, 0);
 
             goto execve_end;
+
+        execve_efault_cleanup:
+            unlock_user(p, arg1, 0);
 
         execve_efault:
             ret = -TARGET_EFAULT;

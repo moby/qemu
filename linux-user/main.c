@@ -613,6 +613,12 @@ int main(int argc, char **argv, char **envp)
     qemu_init_cpu_list();
     module_call_init(MODULE_INIT_QOM);
 
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+    if (argc < 2) {
+        (void) fprintf(stderr, "qemu: CONFIG_BINFMT_PRESERVE_ARGV0: argc = %d (expected >= 2)'\n", argc);
+        exit(EXIT_FAILURE);
+    }
+#endif
     envlist = envlist_create();
 
     /* add current environment into the list */
@@ -784,7 +790,12 @@ int main(int argc, char **argv, char **envp)
     cpu->opaque = ts;
     task_settid(ts);
 
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+    char **target_argvv = target_argv + 1;
+    ret = loader_exec(execfd, filename, target_argvv, target_environ, regs,
+#else
     ret = loader_exec(execfd, filename, target_argv, target_environ, regs,
+#endif
         info, &bprm);
     if (ret != 0) {
         printf("Error while loading %s: %s\n", filename, strerror(-ret));
