@@ -14,6 +14,7 @@
 /* vl.c */
 
 extern const char *bios_name;
+extern int only_migratable;
 extern const char *qemu_name;
 extern QemuUUID qemu_uuid;
 extern bool qemu_uuid_set;
@@ -192,5 +193,6 @@ extern QemuOptsList qemu_nic_opts;
 extern QemuOptsList qemu_net_opts;
 extern QemuOptsList qemu_global_opts;
 extern QemuOptsList qemu_mon_opts;
+extern QemuOptsList qemu_semihosting_config_opts;
 
 #endif

@@ -40,7 +40,6 @@
 #include "hw/ide.h"
 #include "hw/loader.h"
 #include "hw/timer/mc146818rtc.h"
-#include "hw/input/i8042.h"
 #include "hw/isa/pc87312.h"
 #include "hw/net/ne2000-isa.h"
 #include "sysemu/arch_init.h"
@@ -602,7 +601,7 @@ static int prep_set_cmos_checksum(DeviceState *dev, void *opaque)
     uint16_t checksum = *(uint16_t *)opaque;
     ISADevice *rtc;
 
-    if (object_dynamic_cast(OBJECT(dev), "mc146818rtc")) {
+    if (object_dynamic_cast(OBJECT(dev), TYPE_MC146818_RTC)) {
         rtc = ISA_DEVICE(dev);
         rtc_set_memory(rtc, 0x2e, checksum & 0xff);
         rtc_set_memory(rtc, 0x3e, checksum & 0xff);
@@ -674,6 +673,11 @@ static void ibm_40p_init(MachineState *machine)
     /* Memory controller */
     dev = DEVICE(isa_create(isa_bus, "rs6000-mc"));
     qdev_prop_set_uint32(dev, "ram-size", machine->ram_size);
+    qdev_init_nofail(dev);
+
+    /* RTC */
+    dev = DEVICE(isa_create(isa_bus, TYPE_MC146818_RTC));
+    qdev_prop_set_int32(dev, "base_year", 1900);
     qdev_init_nofail(dev);
 
     /* initialize CMOS checksums */

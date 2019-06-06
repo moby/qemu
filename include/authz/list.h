@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef QAUTHZ_LIST_H__
-#define QAUTHZ_LIST_H__
+#ifndef QAUTHZ_LIST_H
+#define QAUTHZ_LIST_H
 
 #include "authz/base.h"
 #include "qapi/qapi-types-authz.h"
@@ -33,8 +33,8 @@
     OBJECT_GET_CLASS(QAuthZListClass, (obj),    \
                       TYPE_QAUTHZ_LIST)
 #define QAUTHZ_LIST(obj) \
-    INTERFACE_CHECK(QAuthZList, (obj),          \
-                    TYPE_QAUTHZ_LIST)
+    OBJECT_CHECK(QAuthZList, (obj), \
+                 TYPE_QAUTHZ_LIST)
 
 typedef struct QAuthZList QAuthZList;
 typedef struct QAuthZListClass QAuthZListClass;
@@ -102,5 +102,4 @@ ssize_t qauthz_list_delete_rule(QAuthZList *auth,
                                 const char *match);
 
 
-#endif /* QAUTHZ_LIST_H__ */
-
+#endif /* QAUTHZ_LIST_H */

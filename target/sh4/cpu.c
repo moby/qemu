@@ -21,6 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/qemu-print.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "migration/vmstate.h"
@@ -79,30 +80,20 @@ static void superh_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
     info->print_insn = print_insn_sh;
 }
 
-typedef struct SuperHCPUListState {
-    fprintf_function cpu_fprintf;
-    FILE *file;
-} SuperHCPUListState;
-
 static void superh_cpu_list_entry(gpointer data, gpointer user_data)
 {
-    SuperHCPUListState *s = user_data;
     const char *typename = object_class_get_name(OBJECT_CLASS(data));
     int len = strlen(typename) - strlen(SUPERH_CPU_TYPE_SUFFIX);
 
-    (*s->cpu_fprintf)(s->file, "%.*s\n", len, typename);
+    qemu_printf("%.*s\n", len, typename);
 }
 
-void sh4_cpu_list(FILE *f, fprintf_function cpu_fprintf)
+void sh4_cpu_list(void)
 {
-    SuperHCPUListState s = {
-        .cpu_fprintf = cpu_fprintf,
-        .file = f,
-    };
     GSList *list;
 
     list = object_class_get_list_sorted(TYPE_SUPERH_CPU, false);
-    g_slist_foreach(list, superh_cpu_list_entry, &s);
+    g_slist_foreach(list, superh_cpu_list_entry, NULL);
     g_slist_free(list);
 }
 
@@ -238,9 +229,8 @@ static void superh_cpu_class_init(ObjectClass *oc, void *data)
     cc->synchronize_from_tb = superh_cpu_synchronize_from_tb;
     cc->gdb_read_register = superh_cpu_gdb_read_register;
     cc->gdb_write_register = superh_cpu_gdb_write_register;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = superh_cpu_handle_mmu_fault;
-#else
+    cc->tlb_fill = superh_cpu_tlb_fill;
+#ifndef CONFIG_USER_ONLY
     cc->do_unaligned_access = superh_cpu_do_unaligned_access;
     cc->get_phys_page_debug = superh_cpu_get_phys_page_debug;
 #endif

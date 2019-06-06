@@ -37,7 +37,7 @@
 #include "qemu/sockets.h"
 #include "sysemu/hw_accel.h"
 #include "sysemu/kvm.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 #include "exec/exec-all.h"
 
 #ifdef CONFIG_USER_ONLY
@@ -1152,6 +1152,7 @@ static int gdb_handle_vcont(GDBState *s, const char *p)
     uint32_t pid, tid;
     GDBProcess *process;
     CPUState *cpu;
+    GDBThreadIdKind kind;
 #ifdef CONFIG_USER_ONLY
     int max_cpus = 1; /* global variable max_cpus exists only in system mode */
 
@@ -1194,12 +1195,21 @@ static int gdb_handle_vcont(GDBState *s, const char *p)
             goto out;
         }
 
-        if (*p++ != ':') {
+        if (*p == '\0' || *p == ';') {
+            /*
+             * No thread specifier, action is on "all threads". The
+             * specification is unclear regarding the process to act on. We
+             * choose all processes.
+             */
+            kind = GDB_ALL_PROCESSES;
+        } else if (*p++ == ':') {
+            kind = read_thread_id(p, &p, &pid, &tid);
+        } else {
             res = -ENOTSUP;
             goto out;
         }
 
-        switch (read_thread_id(p, &p, &pid, &tid)) {
+        switch (kind) {
         case GDB_READ_THREAD_ERR:
             res = -EINVAL;
             goto out;
@@ -1977,7 +1987,7 @@ void gdb_do_syscall(gdb_syscall_complete_cb cb, const char *fmt, ...)
     va_end(va);
 }
 
-static void gdb_read_byte(GDBState *s, int ch)
+static void gdb_read_byte(GDBState *s, uint8_t ch)
 {
     uint8_t reply;
 
@@ -1991,7 +2001,7 @@ static void gdb_read_byte(GDBState *s, int ch)
         } else if (ch == '+') {
             trace_gdbstub_io_got_ack();
         } else {
-            trace_gdbstub_io_got_unexpected((uint8_t)ch);
+            trace_gdbstub_io_got_unexpected(ch);
         }
 
         if (ch == '+' || ch == '$')
@@ -2014,7 +2024,7 @@ static void gdb_read_byte(GDBState *s, int ch)
                 s->line_sum = 0;
                 s->state = RS_GETLINE;
             } else {
-                trace_gdbstub_err_garbage((uint8_t)ch);
+                trace_gdbstub_err_garbage(ch);
             }
             break;
         case RS_GETLINE:
@@ -2054,13 +2064,17 @@ static void gdb_read_byte(GDBState *s, int ch)
             }
             break;
         case RS_GETLINE_RLE:
-            if (ch < ' ') {
+            /*
+             * Run-length encoding is explained in "Debugging with GDB /
+             * Appendix E GDB Remote Serial Protocol / Overview".
+             */
+            if (ch < ' ' || ch == '#' || ch == '$' || ch > 126) {
                 /* invalid RLE count encoding */
-                trace_gdbstub_err_invalid_repeat((uint8_t)ch);
+                trace_gdbstub_err_invalid_repeat(ch);
                 s->state = RS_GETLINE;
             } else {
                 /* decode repeat length */
-                int repeat = (unsigned char)ch - ' ' + 3;
+                int repeat = ch - ' ' + 3;
                 if (s->line_buf_index + repeat >= sizeof(s->line_buf) - 1) {
                     /* that many repeats would overrun the command buffer */
                     trace_gdbstub_err_overrun();
@@ -2082,7 +2096,7 @@ static void gdb_read_byte(GDBState *s, int ch)
         case RS_CHKSUM1:
             /* get high hex digit of checksum */
             if (!isxdigit(ch)) {
-                trace_gdbstub_err_checksum_invalid((uint8_t)ch);
+                trace_gdbstub_err_checksum_invalid(ch);
                 s->state = RS_GETLINE;
                 break;
             }
@@ -2093,7 +2107,7 @@ static void gdb_read_byte(GDBState *s, int ch)
         case RS_CHKSUM2:
             /* get low hex digit of checksum */
             if (!isxdigit(ch)) {
-                trace_gdbstub_err_checksum_invalid((uint8_t)ch);
+                trace_gdbstub_err_checksum_invalid(ch);
                 s->state = RS_GETLINE;
                 break;
             }

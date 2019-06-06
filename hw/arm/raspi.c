@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu-common.h"
 #include "cpu.h"
@@ -19,7 +20,7 @@
 #include "qemu/error-report.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
 #include "sysemu/sysemu.h"
 
 #define SMPBOOT_ADDR    0x300 /* this should leave enough space for ATAGS */
@@ -175,10 +176,15 @@ static void raspi_init(MachineState *machine, int version)
     BusState *bus;
     DeviceState *carddev;
 
-    object_initialize(&s->soc, sizeof(s->soc),
-                      version == 3 ? TYPE_BCM2837 : TYPE_BCM2836);
-    object_property_add_child(OBJECT(machine), "soc", OBJECT(&s->soc),
-                              &error_abort);
+    if (machine->ram_size > 1 * GiB) {
+        error_report("Requested ram size is too large for this machine: "
+                     "maximum is 1GB");
+        exit(1);
+    }
+
+    object_initialize_child(OBJECT(machine), "soc", &s->soc, sizeof(s->soc),
+                            version == 3 ? TYPE_BCM2837 : TYPE_BCM2836,
+                            &error_abort, NULL);
 
     /* Allocate and map RAM */
     memory_region_allocate_system_memory(&s->ram, OBJECT(machine), "ram",

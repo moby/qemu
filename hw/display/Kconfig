@@ -1,3 +1,8 @@
+config DDC
+    bool
+    depends on I2C
+    select EDID
+
 config EDID
     bool
 
@@ -21,10 +26,12 @@ config JAZZ_LED
 
 config PL110
     bool
+    select FRAMEBUFFER
 
 config SII9022
     bool
     depends on I2C
+    select DDC
 
 config SSD0303
     bool
@@ -100,12 +107,23 @@ config VIRTIO_GPU
 
 config VIRTIO_VGA
     bool
-    default y if PCI_DEVICES
+    # defaults to "N", enabled by specific boards
     depends on VIRTIO_PCI
     select VGA
 
+config VHOST_USER_GPU
+    bool
+    default y
+    depends on VIRTIO_GPU && VHOST_USER
+
+config VHOST_USER_VGA
+    bool
+    default y
+    depends on VIRTIO_VGA && VHOST_USER_GPU
+
 config DPCD
     bool
+    select AUX
 
 config ATI_VGA
     bool

@@ -565,7 +565,7 @@
 #
 # Manage read, write and flush latency histograms for the device.
 #
-# If only @device parameter is specified, remove all present latency histograms
+# If only @id parameter is specified, remove all present latency histograms
 # for the device. Otherwise, add/reset some of (or all) latency histograms.
 #
 # @id: The name or QOM path of the guest device.
@@ -597,7 +597,7 @@
 # [0, 10), [10, 50), [50, 100), [100, +inf):
 #
 # -> { "execute": "block-latency-histogram-set",
-#      "arguments": { "device": "drive0",
+#      "arguments": { "id": "drive0",
 #                     "boundaries": [10, 50, 100] } }
 # <- { "return": {} }
 #
@@ -605,7 +605,7 @@
 # not changed (or not created):
 #
 # -> { "execute": "block-latency-histogram-set",
-#      "arguments": { "device": "drive0",
+#      "arguments": { "id": "drive0",
 #                     "boundaries-write": [10, 50, 100] } }
 # <- { "return": {} }
 #
@@ -614,7 +614,7 @@
 #   write: [0, 1000), [1000, 5000), [5000, +inf)
 #
 # -> { "execute": "block-latency-histogram-set",
-#      "arguments": { "device": "drive0",
+#      "arguments": { "id": "drive0",
 #                     "boundaries": [10, 50, 100],
 #                     "boundaries-write": [1000, 5000] } }
 # <- { "return": {} }
@@ -622,7 +622,7 @@
 # Example: remove all latency histograms:
 #
 # -> { "execute": "block-latency-histogram-set",
-#      "arguments": { "device": "drive0" } }
+#      "arguments": { "id": "drive0" } }
 # <- { "return": {} }
 ##
 { 'command': 'block-latency-histogram-set',
@@ -2004,18 +2004,34 @@
             '*persistent': 'bool', '*autoload': 'bool', '*disabled': 'bool' } }
 
 ##
+# @BlockDirtyBitmapMergeSource:
+#
+# @local: name of the bitmap, attached to the same node as target bitmap.
+#
+# @external: bitmap with specified node
+#
+# Since: 4.1
+##
+{ 'alternate': 'BlockDirtyBitmapMergeSource',
+  'data': { 'local': 'str',
+            'external': 'BlockDirtyBitmap' } }
+
+##
 # @BlockDirtyBitmapMerge:
 #
-# @node: name of device/node which the bitmap is tracking
+# @node: name of device/node which the @target bitmap is tracking
 #
 # @target: name of the destination dirty bitmap
 #
-# @bitmaps: name(s) of the source dirty bitmap(s)
+# @bitmaps: name(s) of the source dirty bitmap(s) at @node and/or fully
+#           specifed BlockDirtyBitmap elements. The latter are supported
+#           since 4.1.
 #
 # Since: 4.0
 ##
 { 'struct': 'BlockDirtyBitmapMerge',
-  'data': { 'node': 'str', 'target': 'str', 'bitmaps': ['str'] } }
+  'data': { 'node': 'str', 'target': 'str',
+            'bitmaps': ['BlockDirtyBitmapMergeSource'] } }
 
 ##
 # @block-dirty-bitmap-add:
@@ -3215,6 +3231,8 @@
 #
 # @cor_write: a write due to copy-on-read (since 2.11)
 #
+# @cluster_alloc_space: an allocation of file space for a cluster (since 4.1)
+#
 # Since: 2.9
 ##
 { 'enum': 'BlkdebugEvent', 'prefix': 'BLKDBG',
@@ -3233,7 +3251,7 @@
             'pwritev_rmw_tail', 'pwritev_rmw_after_tail', 'pwritev',
             'pwritev_zero', 'pwritev_done', 'empty_image_prepare',
             'l1_shrink_write_table', 'l1_shrink_free_l2_clusters',
-            'cor_write'] }
+            'cor_write', 'cluster_alloc_space'] }
 
 ##
 # @BlkdebugInjectErrorOptions:

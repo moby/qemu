@@ -21,12 +21,11 @@
 #define QEMU_CPU_H
 
 #include "hw/qdev-core.h"
-#include "disas/bfd.h"
+#include "disas/dis-asm.h"
 #include "exec/hwaddr.h"
 #include "exec/memattrs.h"
 #include "qapi/qapi-types-run-state.h"
 #include "qemu/bitmap.h"
-#include "qemu/fprintf-fn.h"
 #include "qemu/rcu_queue.h"
 #include "qemu/queue.h"
 #include "qemu/thread.h"
@@ -118,7 +117,12 @@ struct TranslationBlock;
  *       This always includes at least the program counter; some targets
  *       will need to do more. If this hook is not implemented then the
  *       default is to call @set_pc(tb->pc).
- * @handle_mmu_fault: Callback for handling an MMU fault.
+ * @tlb_fill: Callback for handling a softmmu tlb miss or user-only
+ *       address fault.  For system mode, if the access is valid, call
+ *       tlb_set_page and return true; if the access is invalid, and
+ *       probe is true, return false; otherwise raise an exception and
+ *       do not return.  For user-only mode, always raise an exception
+ *       and do not return.
  * @get_phys_page_debug: Callback for obtaining a physical address.
  * @get_phys_page_attrs_debug: Callback for obtaining a physical address and the
  *       associated memory transaction attributes to use for the access.
@@ -181,19 +185,18 @@ typedef struct CPUClass {
     bool (*virtio_is_big_endian)(CPUState *cpu);
     int (*memory_rw_debug)(CPUState *cpu, vaddr addr,
                            uint8_t *buf, int len, bool is_write);
-    void (*dump_state)(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                       int flags);
+    void (*dump_state)(CPUState *cpu, FILE *, int flags);
     GuestPanicInformation* (*get_crash_info)(CPUState *cpu);
-    void (*dump_statistics)(CPUState *cpu, FILE *f,
-                            fprintf_function cpu_fprintf, int flags);
+    void (*dump_statistics)(CPUState *cpu, int flags);
     int64_t (*get_arch_id)(CPUState *cpu);
     bool (*get_paging_enabled)(const CPUState *cpu);
     void (*get_memory_mapping)(CPUState *cpu, MemoryMappingList *list,
                                Error **errp);
     void (*set_pc)(CPUState *cpu, vaddr value);
     void (*synchronize_from_tb)(CPUState *cpu, struct TranslationBlock *tb);
-    int (*handle_mmu_fault)(CPUState *cpu, vaddr address, int size, int rw,
-                            int mmu_index);
+    bool (*tlb_fill)(CPUState *cpu, vaddr address, int size,
+                     MMUAccessType access_type, int mmu_idx,
+                     bool probe, uintptr_t retaddr);
     hwaddr (*get_phys_page_debug)(CPUState *cpu, vaddr addr);
     hwaddr (*get_phys_page_attrs_debug)(CPUState *cpu, vaddr addr,
                                         MemTxAttrs *attrs);
@@ -372,6 +375,7 @@ struct CPUState {
     int singlestep_enabled;
     int64_t icount_budget;
     int64_t icount_extra;
+    uint64_t random_seed;
     sigjmp_buf jmp_env;
 
     QemuMutex work_mutex;
@@ -564,26 +568,21 @@ enum CPUDumpFlags {
 /**
  * cpu_dump_state:
  * @cpu: The CPU whose state is to be dumped.
- * @f: File to dump to.
- * @cpu_fprintf: Function to dump with.
- * @flags: Flags what to dump.
+ * @f: If non-null, dump to this stream, else to current print sink.
  *
  * Dumps CPU state.
  */
-void cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                    int flags);
+void cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 
 /**
  * cpu_dump_statistics:
  * @cpu: The CPU whose state is to be dumped.
- * @f: File to dump to.
- * @cpu_fprintf: Function to dump with.
  * @flags: Flags what to dump.
  *
- * Dumps CPU statistics.
+ * Dump CPU statistics to the current monitor if we have one, else to
+ * stdout.
  */
-void cpu_dump_statistics(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                         int flags);
+void cpu_dump_statistics(CPUState *cpu, int flags);
 
 #ifndef CONFIG_USER_ONLY
 /**
@@ -689,15 +688,15 @@ ObjectClass *cpu_class_by_name(const char *typename, const char *cpu_model);
 CPUState *cpu_create(const char *typename);
 
 /**
- * parse_cpu_model:
- * @cpu_model: The model string including optional parameters.
+ * parse_cpu_option:
+ * @cpu_option: The -cpu option including optional parameters.
  *
  * processes optional parameters and registers them as global properties
  *
  * Returns: type of CPU to create or prints error and terminates process
  *          if an error occurred.
  */
-const char *parse_cpu_model(const char *cpu_model);
+const char *parse_cpu_option(const char *cpu_option);
 
 /**
  * cpu_has_work:

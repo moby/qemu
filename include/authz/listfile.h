@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef QAUTHZ_LIST_FILE_H__
-#define QAUTHZ_LIST_FILE_H__
+#ifndef QAUTHZ_LISTFILE_H
+#define QAUTHZ_LISTFILE_H
 
 #include "authz/list.h"
 #include "qapi/qapi-types-authz.h"
@@ -34,8 +34,8 @@
     OBJECT_GET_CLASS(QAuthZListFileClass, (obj),    \
                       TYPE_QAUTHZ_LIST_FILE)
 #define QAUTHZ_LIST_FILE(obj) \
-    INTERFACE_CHECK(QAuthZListFile, (obj),          \
-                    TYPE_QAUTHZ_LIST_FILE)
+    OBJECT_CHECK(QAuthZListFile, (obj), \
+                 TYPE_QAUTHZ_LIST_FILE)
 
 typedef struct QAuthZListFile QAuthZListFile;
 typedef struct QAuthZListFileClass QAuthZListFileClass;
@@ -92,7 +92,7 @@ struct QAuthZListFile {
     char *filename;
     bool refresh;
     QFileMonitor *file_monitor;
-    int file_watch;
+    int64_t file_watch;
 };
 
 
@@ -106,6 +106,4 @@ QAuthZListFile *qauthz_list_file_new(const char *id,
                                      bool refresh,
                                      Error **errp);
 
-
-#endif /* QAUTHZ_LIST_FILE_H__ */
-
+#endif /* QAUTHZ_LISTFILE_H */

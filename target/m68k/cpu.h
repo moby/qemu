@@ -179,8 +179,7 @@ static inline M68kCPU *m68k_env_get_cpu(CPUM68KState *env)
 
 void m68k_cpu_do_interrupt(CPUState *cpu);
 bool m68k_cpu_exec_interrupt(CPUState *cpu, int int_req);
-void m68k_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                         int flags);
+void m68k_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr m68k_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int m68k_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int m68k_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
@@ -499,7 +498,7 @@ static inline int m68k_feature(CPUM68KState *env, int feature)
     return (env->features & (1u << feature)) != 0;
 }
 
-void m68k_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void m68k_cpu_list(void);
 
 void register_m68k_insns (CPUM68KState *env);
 
@@ -543,11 +542,13 @@ static inline int cpu_mmu_index (CPUM68KState *env, bool ifetch)
     return (env->sr & SR_S) == 0 ? 1 : 0;
 }
 
-int m68k_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int size, int rw,
-                              int mmu_idx);
-void m68k_cpu_unassigned_access(CPUState *cs, hwaddr addr,
-                                bool is_write, bool is_exec, int is_asi,
-                                unsigned size);
+bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr);
+void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
+                                 unsigned size, MMUAccessType access_type,
+                                 int mmu_idx, MemTxAttrs attrs,
+                                 MemTxResult response, uintptr_t retaddr);
 
 #include "exec/cpu-all.h"
 
@@ -573,5 +574,6 @@ static inline void cpu_get_tb_cpu_state(CPUM68KState *env, target_ulong *pc,
     }
 }
 
-void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUM68KState *env);
+void dump_mmu(CPUM68KState *env);
+
 #endif

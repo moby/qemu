@@ -83,8 +83,13 @@ typedef enum {
      */
     BDRV_REQ_SERIALISING        = 0x80,
 
+    /* Execute the request only if the operation can be offloaded or otherwise
+     * be executed efficiently, but return an error instead of using a slow
+     * fallback. */
+    BDRV_REQ_NO_FALLBACK        = 0x100,
+
     /* Mask of valid flags */
-    BDRV_REQ_MASK               = 0xff,
+    BDRV_REQ_MASK               = 0x1ff,
 } BdrvRequestFlags;
 
 typedef struct BlockSizes {
@@ -151,10 +156,15 @@ typedef struct HDGeometry {
  * BDRV_BLOCK_EOF: the returned pnum covers through end of file for this
  *                 layer, set by block layer
  *
- * Internal flag:
+ * Internal flags:
  * BDRV_BLOCK_RAW: for use by passthrough drivers, such as raw, to request
  *                 that the block layer recompute the answer from the returned
  *                 BDS; must be accompanied by just BDRV_BLOCK_OFFSET_VALID.
+ * BDRV_BLOCK_RECURSE: request that the block layer will recursively search for
+ *                     zeroes in file child of current block node inside
+ *                     returned region. Only valid together with both
+ *                     BDRV_BLOCK_DATA and BDRV_BLOCK_OFFSET_VALID. Should not
+ *                     appear with BDRV_BLOCK_ZERO.
  *
  * If BDRV_BLOCK_OFFSET_VALID is set, the map parameter represents the
  * host offset within the returned BDS that is allocated for the
@@ -179,6 +189,7 @@ typedef struct HDGeometry {
 #define BDRV_BLOCK_RAW          0x08
 #define BDRV_BLOCK_ALLOCATED    0x10
 #define BDRV_BLOCK_EOF          0x20
+#define BDRV_BLOCK_RECURSE      0x40
 #define BDRV_BLOCK_OFFSET_MASK  BDRV_SECTOR_MASK
 
 typedef QSIMPLEQ_HEAD(BlockReopenQueue, BlockReopenQueueEntry) BlockReopenQueue;
@@ -311,10 +322,6 @@ int bdrv_reopen_prepare(BDRVReopenState *reopen_state,
                         BlockReopenQueue *queue, Error **errp);
 void bdrv_reopen_commit(BDRVReopenState *reopen_state);
 void bdrv_reopen_abort(BDRVReopenState *reopen_state);
-int bdrv_read(BdrvChild *child, int64_t sector_num,
-              uint8_t *buf, int nb_sectors);
-int bdrv_write(BdrvChild *child, int64_t sector_num,
-               const uint8_t *buf, int nb_sectors);
 int bdrv_pwrite_zeroes(BdrvChild *child, int64_t offset,
                        int bytes, BdrvRequestFlags flags);
 int bdrv_make_zero(BdrvChild *child, BdrvRequestFlags flags);
@@ -427,8 +434,8 @@ void bdrv_drain_all(void);
     AIO_WAIT_WHILE(bdrv_get_aio_context(bs_),              \
                    cond); })
 
-int bdrv_pdiscard(BdrvChild *child, int64_t offset, int bytes);
-int bdrv_co_pdiscard(BdrvChild *child, int64_t offset, int bytes);
+int bdrv_pdiscard(BdrvChild *child, int64_t offset, int64_t bytes);
+int bdrv_co_pdiscard(BdrvChild *child, int64_t offset, int64_t bytes);
 int bdrv_has_zero_init_1(BlockDriverState *bs);
 int bdrv_has_zero_init(BlockDriverState *bs);
 bool bdrv_unallocated_blocks_are_zero(BlockDriverState *bs);
@@ -576,15 +583,16 @@ AioContext *bdrv_get_aio_context(BlockDriverState *bs);
  */
 void bdrv_coroutine_enter(BlockDriverState *bs, Coroutine *co);
 
-/**
- * bdrv_set_aio_context:
- *
- * Changes the #AioContext used for fd handlers, timers, and BHs by this
- * BlockDriverState and all its children.
- *
- * This function must be called with iothread lock held.
- */
-void bdrv_set_aio_context(BlockDriverState *bs, AioContext *new_context);
+void bdrv_set_aio_context_ignore(BlockDriverState *bs,
+                                 AioContext *new_context, GSList **ignore);
+int bdrv_try_set_aio_context(BlockDriverState *bs, AioContext *ctx,
+                             Error **errp);
+int bdrv_child_try_set_aio_context(BlockDriverState *bs, AioContext *ctx,
+                                   BdrvChild *ignore_child, Error **errp);
+bool bdrv_child_can_set_aio_context(BdrvChild *c, AioContext *ctx,
+                                    GSList **ignore, Error **errp);
+bool bdrv_can_set_aio_context(BlockDriverState *bs, AioContext *ctx,
+                              GSList **ignore, Error **errp);
 int bdrv_probe_blocksizes(BlockDriverState *bs, BlockSizes *bsz);
 int bdrv_probe_geometry(BlockDriverState *bs, HDGeometry *geo);
 

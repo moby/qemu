@@ -558,13 +558,14 @@ static inline void tcg_out_dsra(TCGContext *s, TCGReg rd, TCGReg rt, TCGArg sa)
     tcg_out_opc_sa64(s, OPC_DSRA, OPC_DSRA32, rd, rt, sa);
 }
 
-static inline void tcg_out_mov(TCGContext *s, TCGType type,
+static inline bool tcg_out_mov(TCGContext *s, TCGType type,
                                TCGReg ret, TCGReg arg)
 {
     /* Simple reg-reg move, optimising out the 'do nothing' case */
     if (ret != arg) {
         tcg_out_opc_reg(s, OPC_OR, ret, arg, TCG_REG_ZERO);
     }
+    return true;
 }
 
 static void tcg_out_movi(TCGContext *s, TCGType type,
@@ -1338,7 +1339,7 @@ static void add_qemu_ldst_label(TCGContext *s, int is_ld, TCGMemOpIdx oi,
     }
 }
 
-static void tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 {
     TCGMemOpIdx oi = l->oi;
     TCGMemOp opc = get_memop(oi);
@@ -1385,9 +1386,10 @@ static void tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     } else {
         tcg_out_opc_reg(s, OPC_OR, v0, TCG_REG_V0, TCG_REG_ZERO);
     }
+    return true;
 }
 
-static void tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 {
     TCGMemOpIdx oi = l->oi;
     TCGMemOp opc = get_memop(oi);
@@ -1435,6 +1437,7 @@ static void tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     tcg_out_call_int(s, qemu_st_helpers[opc & (MO_BSWAP | MO_SIZE)], true);
     /* delay slot */
     tcg_out_mov(s, TCG_TYPE_PTR, tcg_target_call_iarg_regs[0], TCG_AREG0);
+    return true;
 }
 #endif
 

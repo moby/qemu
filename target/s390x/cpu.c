@@ -399,6 +399,13 @@ int s390_set_memory_limit(uint64_t new_limit, uint64_t *hw_limit)
     return 0;
 }
 
+void s390_set_max_pagesize(uint64_t pagesize, Error **errp)
+{
+    if (kvm_enabled()) {
+        kvm_s390_set_max_pagesize(pagesize, errp);
+    }
+}
+
 void s390_cmma_reset(void)
 {
     if (kvm_enabled()) {
@@ -471,9 +478,7 @@ static void s390_cpu_class_init(ObjectClass *oc, void *data)
     cc->set_pc = s390_cpu_set_pc;
     cc->gdb_read_register = s390_cpu_gdb_read_register;
     cc->gdb_write_register = s390_cpu_gdb_write_register;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = s390_cpu_handle_mmu_fault;
-#else
+#ifndef CONFIG_USER_ONLY
     cc->get_phys_page_debug = s390_cpu_get_phys_page_debug;
     cc->vmsd = &vmstate_s390_cpu;
     cc->write_elf64_note = s390_cpu_write_elf64_note;
@@ -486,6 +491,7 @@ static void s390_cpu_class_init(ObjectClass *oc, void *data)
     cc->disas_set_info = s390_cpu_disas_set_info;
 #ifdef CONFIG_TCG
     cc->tcg_initialize = s390x_translate_init;
+    cc->tlb_fill = s390_cpu_tlb_fill;
 #endif
 
     cc->gdb_num_core_regs = S390_NUM_CORE_REGS;

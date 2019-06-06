@@ -515,10 +515,10 @@ static bool patch_reloc(tcg_insn_unit *code_ptr, int type,
  * TCG intrinsics
  */
 
-static void tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
+static bool tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
 {
     if (ret == arg) {
-        return;
+        return true;
     }
     switch (type) {
     case TCG_TYPE_I32:
@@ -528,6 +528,7 @@ static void tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
     default:
         g_assert_not_reached();
     }
+    return true;
 }
 
 static void tcg_out_movi(TCGContext *s, TCGType type, TCGReg rd,
@@ -1065,7 +1066,7 @@ static void add_qemu_ldst_label(TCGContext *s, int is_ld, TCGMemOpIdx oi,
     label->label_ptr[0] = label_ptr[0];
 }
 
-static void tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 {
     TCGMemOpIdx oi = l->oi;
     TCGMemOp opc = get_memop(oi);
@@ -1080,7 +1081,10 @@ static void tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     }
 
     /* resolve label address */
-    patch_reloc(l->label_ptr[0], R_RISCV_BRANCH, (intptr_t) s->code_ptr, 0);
+    if (!patch_reloc(l->label_ptr[0], R_RISCV_BRANCH,
+                     (intptr_t) s->code_ptr, 0)) {
+        return false;
+    }
 
     /* call load helper */
     tcg_out_mov(s, TCG_TYPE_PTR, a0, TCG_AREG0);
@@ -1092,9 +1096,10 @@ static void tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     tcg_out_mov(s, (opc & MO_SIZE) == MO_64, l->datalo_reg, a0);
 
     tcg_out_goto(s, l->raddr);
+    return true;
 }
 
-static void tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 {
     TCGMemOpIdx oi = l->oi;
     TCGMemOp opc = get_memop(oi);
@@ -1111,7 +1116,10 @@ static void tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     }
 
     /* resolve label address */
-    patch_reloc(l->label_ptr[0], R_RISCV_BRANCH, (intptr_t) s->code_ptr, 0);
+    if (!patch_reloc(l->label_ptr[0], R_RISCV_BRANCH,
+                     (intptr_t) s->code_ptr, 0)) {
+        return false;
+    }
 
     /* call store helper */
     tcg_out_mov(s, TCG_TYPE_PTR, a0, TCG_AREG0);
@@ -1133,6 +1141,7 @@ static void tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
     tcg_out_call(s, qemu_st_helpers[opc & (MO_BSWAP | MO_SSIZE)]);
 
     tcg_out_goto(s, l->raddr);
+    return true;
 }
 #endif /* CONFIG_SOFTMMU */
 

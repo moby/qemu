@@ -24,9 +24,15 @@
 #define ACPI_REBUILD_EXPECTED_AML "TEST_ACPI_REBUILD_AML"
 
 typedef struct {
+    const char *accel;
     const char *machine;
     const char *variant;
-    uint32_t rsdp_addr;
+    const char *uefi_fl1;
+    const char *uefi_fl2;
+    const char *cd;
+    const uint64_t ram_start;
+    const uint64_t scan_len;
+    uint64_t rsdp_addr;
     uint8_t rsdp_table[36 /* ACPI 2.0+ RSDP size */];
     GArray *tables;
     uint32_t smbios_ep_addr;
@@ -77,22 +83,13 @@ static void free_test_data(test_data *data)
     g_array_free(data->tables, true);
 }
 
-static void test_acpi_rsdp_address(test_data *data)
-{
-    uint32_t off = acpi_find_rsdp_address(data->qts);
-    g_assert_cmphex(off, <, 0x100000);
-    data->rsdp_addr = off;
-}
-
 static void test_acpi_rsdp_table(test_data *data)
 {
-    uint8_t *rsdp_table = data->rsdp_table, revision;
-    uint32_t addr = data->rsdp_addr;
+    uint8_t *rsdp_table = data->rsdp_table;
 
-    acpi_parse_rsdp_table(data->qts, addr, rsdp_table);
-    revision = rsdp_table[15 /* Revision offset */];
+    acpi_fetch_rsdp_table(data->qts, data->rsdp_addr, rsdp_table);
 
-    switch (revision) {
+    switch (rsdp_table[15 /* Revision offset */]) {
     case 0: /* ACPI 1.0 RSDP */
         /* With rev 1, checksum is only for the first 20 bytes */
         g_assert(!acpi_calc_checksum(rsdp_table,  20));
@@ -107,21 +104,29 @@ static void test_acpi_rsdp_table(test_data *data)
     }
 }
 
-static void test_acpi_rsdt_table(test_data *data)
+static void test_acpi_rxsdt_table(test_data *data)
 {
+    const char *sig = "RSDT";
     AcpiSdtTable rsdt = {};
+    int entry_size = 4;
+    int addr_off = 16 /* RsdtAddress */;
     uint8_t *ent;
 
-    /* read RSDT table */
+    if (data->rsdp_table[15 /* Revision offset */] != 0) {
+        addr_off = 24 /* XsdtAddress */;
+        entry_size = 8;
+        sig = "XSDT";
+    }
+    /* read [RX]SDT table */
     acpi_fetch_table(data->qts, &rsdt.aml, &rsdt.aml_len,
-                     &data->rsdp_table[16 /* RsdtAddress */], "RSDT", true);
+                     &data->rsdp_table[addr_off], entry_size, sig, true);
 
     /* Load all tables and add to test list directly RSDT referenced tables */
-    ACPI_FOREACH_RSDT_ENTRY(rsdt.aml, rsdt.aml_len, ent, 4 /* Entry size */) {
+    ACPI_FOREACH_RSDT_ENTRY(rsdt.aml, rsdt.aml_len, ent, entry_size) {
         AcpiSdtTable ssdt_table = {};
 
         acpi_fetch_table(data->qts, &ssdt_table.aml, &ssdt_table.aml_len, ent,
-                         NULL, true);
+                         entry_size, NULL, true);
         /* Add table to ASL test tables list */
         g_array_append_val(data->tables, ssdt_table);
     }
@@ -134,16 +139,29 @@ static void test_acpi_fadt_table(test_data *data)
     AcpiSdtTable table = g_array_index(data->tables, typeof(table), 0);
     uint8_t *fadt_aml = table.aml;
     uint32_t fadt_len = table.aml_len;
+    uint32_t val;
+    int dsdt_offset = 40 /* DSDT */;
+    int dsdt_entry_size = 4;
 
     g_assert(compare_signature(&table, "FACP"));
 
     /* Since DSDT/FACS isn't in RSDT, add them to ASL test list manually */
-    acpi_fetch_table(data->qts, &table.aml, &table.aml_len,
-                     fadt_aml + 36 /* FIRMWARE_CTRL */, "FACS", false);
-    g_array_append_val(data->tables, table);
+    memcpy(&val, fadt_aml + 112 /* Flags */, 4);
+    val = le32_to_cpu(val);
+    if (!(val & 1UL << 20 /* HW_REDUCED_ACPI */)) {
+        acpi_fetch_table(data->qts, &table.aml, &table.aml_len,
+                         fadt_aml + 36 /* FIRMWARE_CTRL */, 4, "FACS", false);
+        g_array_append_val(data->tables, table);
+    }
 
+    memcpy(&val, fadt_aml + dsdt_offset, 4);
+    val = le32_to_cpu(val);
+    if (!val) {
+        dsdt_offset = 140 /* X_DSDT */;
+        dsdt_entry_size = 8;
+    }
     acpi_fetch_table(data->qts, &table.aml, &table.aml_len,
-                     fadt_aml + 40 /* DSDT */, "DSDT", true);
+                     fadt_aml + dsdt_offset, dsdt_entry_size, "DSDT", true);
     g_array_append_val(data->tables, table);
 
     memset(fadt_aml + 36, 0, 4); /* sanitize FIRMWARE_CTRL ptr */
@@ -177,11 +195,14 @@ static void dump_aml_files(test_data *data, bool rebuild)
                                        sdt->aml, ext);
             fd = g_open(aml_file, O_WRONLY|O_TRUNC|O_CREAT,
                         S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+            if (fd < 0) {
+                perror(aml_file);
+            }
+            g_assert(fd >= 0);
         } else {
             fd = g_file_open_tmp("aml-XXXXXX", &sdt->aml_file, &error);
             g_assert_no_error(error);
         }
-        g_assert(fd >= 0);
 
         ret = qemu_write_full(fd, sdt->aml, sdt->aml_len);
         g_assert(ret == sdt->aml_len);
@@ -321,13 +342,29 @@ try_again:
     return exp_tables;
 }
 
+static bool test_acpi_find_diff_allowed(AcpiSdtTable *sdt)
+{
+    const gchar *allowed_diff_file[] = {
+#include "bios-tables-test-allowed-diff.h"
+        NULL
+    };
+    const gchar **f;
+
+    for (f = allowed_diff_file; *f; ++f) {
+        if (!g_strcmp0(sdt->aml_file, *f)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* test the list of tables in @data->tables against reference tables */
 static void test_acpi_asl(test_data *data)
 {
     int i;
     AcpiSdtTable *sdt, *exp_sdt;
     test_data exp_data;
-    gboolean exp_err, err;
+    gboolean exp_err, err, all_tables_match = true;
 
     memset(&exp_data, 0, sizeof(exp_data));
     exp_data.tables = load_expected_aml(data);
@@ -337,6 +374,20 @@ static void test_acpi_asl(test_data *data)
 
         sdt = &g_array_index(data->tables, AcpiSdtTable, i);
         exp_sdt = &g_array_index(exp_data.tables, AcpiSdtTable, i);
+
+        if (sdt->aml_len == exp_sdt->aml_len &&
+            !memcmp(sdt->aml, exp_sdt->aml, sdt->aml_len)) {
+            /* Identical table binaries: no need to disassemble. */
+            continue;
+        }
+
+        fprintf(stderr,
+                "acpi-test: Warning! %.4s binary file mismatch. "
+                "Actual [aml:%s], Expected [aml:%s].\n",
+                exp_sdt->aml, sdt->aml_file, exp_sdt->aml_file);
+
+        all_tables_match = all_tables_match &&
+            test_acpi_find_diff_allowed(exp_sdt);
 
         err = load_asl(data->tables, sdt);
         asl = normalize_asl(sdt->asl);
@@ -375,11 +426,12 @@ static void test_acpi_asl(test_data *data)
                             "see ASL difference.");
                     }
                 }
-          }
+            }
         }
         g_string_free(asl, true);
         g_string_free(exp_asl, true);
     }
+    g_assert(all_tables_match);
 
     free_test_data(&exp_data);
 }
@@ -505,23 +557,44 @@ static void test_smbios_structs(test_data *data)
 static void test_acpi_one(const char *params, test_data *data)
 {
     char *args;
+    bool use_uefi = data->uefi_fl1 && data->uefi_fl2;
 
-    /* Disable kernel irqchip to be able to override apic irq0. */
-    args = g_strdup_printf("-machine %s,accel=%s,kernel-irqchip=off "
-                           "-net none -display none %s "
-                           "-drive id=hd0,if=none,file=%s,format=raw "
-                           "-device ide-hd,drive=hd0 ",
-                           data->machine, "kvm:tcg",
-                           params ? params : "", disk);
+    if (use_uefi) {
+        /*
+         * TODO: convert '-drive if=pflash' to new syntax (see e33763be7cd3)
+         * when arm/virt boad starts to support it.
+         */
+        args = g_strdup_printf("-machine %s,accel=%s -nodefaults -nographic "
+            "-drive if=pflash,format=raw,file=%s,readonly "
+            "-drive if=pflash,format=raw,file=%s,snapshot=on -cdrom %s %s",
+            data->machine, data->accel ? data->accel : "kvm:tcg",
+            data->uefi_fl1, data->uefi_fl2, data->cd, params ? params : "");
+
+    } else {
+        /* Disable kernel irqchip to be able to override apic irq0. */
+        args = g_strdup_printf("-machine %s,accel=%s,kernel-irqchip=off "
+            "-net none -display none %s "
+            "-drive id=hd0,if=none,file=%s,format=raw "
+            "-device ide-hd,drive=hd0 ",
+             data->machine, data->accel ? data->accel : "kvm:tcg",
+             params ? params : "", disk);
+    }
 
     data->qts = qtest_init(args);
 
-    boot_sector_test(data->qts);
+    if (use_uefi) {
+        g_assert(data->scan_len);
+        data->rsdp_addr = acpi_find_rsdp_address_uefi(data->qts,
+            data->ram_start, data->scan_len);
+    } else {
+        boot_sector_test(data->qts);
+        data->rsdp_addr = acpi_find_rsdp_address(data->qts);
+        g_assert_cmphex(data->rsdp_addr, <, 0x100000);
+    }
 
     data->tables = g_array_new(false, true, sizeof(AcpiSdtTable));
-    test_acpi_rsdp_address(data);
     test_acpi_rsdp_table(data);
-    test_acpi_rsdt_table(data);
+    test_acpi_rxsdt_table(data);
     test_acpi_fadt_table(data);
 
     if (iasl) {
@@ -532,8 +605,15 @@ static void test_acpi_one(const char *params, test_data *data)
         }
     }
 
-    test_smbios_entry_point(data);
-    test_smbios_structs(data);
+    /*
+     * TODO: make SMBIOS tests work with UEFI firmware,
+     * Bug on uefi-test-tools to provide entry point:
+     * https://bugs.launchpad.net/qemu/+bug/1821884
+     */
+    if (!use_uefi) {
+        test_smbios_entry_point(data);
+        test_smbios_structs(data);
+    }
 
     assert(!global_qtest);
     qtest_quit(data->qts);
@@ -764,18 +844,35 @@ static void test_acpi_piix4_tcg_dimm_pxm(void)
     test_acpi_tcg_dimm_pxm(MACHINE_PC);
 }
 
+static void test_acpi_virt_tcg(void)
+{
+    test_data data = {
+        .machine = "virt",
+        .accel = "tcg",
+        .uefi_fl1 = "pc-bios/edk2-aarch64-code.fd",
+        .uefi_fl2 = "pc-bios/edk2-arm-vars.fd",
+        .cd = "tests/data/uefi-boot-images/bios-tables-test.aarch64.iso.qcow2",
+        .ram_start = 0x40000000ULL,
+        .scan_len = 128ULL * 1024 * 1024,
+    };
+
+    test_acpi_one("-cpu cortex-a57", &data);
+    free_test_data(&data);
+}
+
 int main(int argc, char *argv[])
 {
     const char *arch = qtest_get_arch();
     int ret;
 
-    ret = boot_sector_init(disk);
-    if(ret)
-        return ret;
-
     g_test_init(&argc, &argv, NULL);
 
     if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
+        ret = boot_sector_init(disk);
+        if (ret) {
+            return ret;
+        }
+
         qtest_add_func("acpi/piix4", test_acpi_piix4_tcg);
         qtest_add_func("acpi/piix4/bridge", test_acpi_piix4_tcg_bridge);
         qtest_add_func("acpi/q35", test_acpi_q35_tcg);
@@ -791,6 +888,8 @@ int main(int argc, char *argv[])
         qtest_add_func("acpi/q35/numamem", test_acpi_q35_tcg_numamem);
         qtest_add_func("acpi/piix4/dimmpxm", test_acpi_piix4_tcg_dimm_pxm);
         qtest_add_func("acpi/q35/dimmpxm", test_acpi_q35_tcg_dimm_pxm);
+    } else if (strcmp(arch, "aarch64") == 0) {
+        qtest_add_func("acpi/virt", test_acpi_virt_tcg);
     }
     ret = g_test_run();
     boot_sector_cleanup(disk);

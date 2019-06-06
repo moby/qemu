@@ -683,7 +683,7 @@ int parse_uint(const char *s, unsigned long long *value, char **endptr,
     }
 
     /* make sure we reject negative numbers: */
-    while (isspace((unsigned char)*s)) {
+    while (qemu_isspace(*s)) {
         s++;
     }
     if (*s == '-') {
@@ -825,7 +825,7 @@ const char *qemu_ether_ntoa(const MACAddr *mac)
 char *size_to_str(uint64_t val)
 {
     static const char *suffixes[] = { "", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei" };
-    unsigned long div;
+    uint64_t div;
     int i;
 
     /*

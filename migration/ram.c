@@ -583,20 +583,29 @@ exit:
 
 #define MULTIFD_FLAG_SYNC (1 << 0)
 
+/* This value needs to be a multiple of qemu_target_page_size() */
+#define MULTIFD_PACKET_SIZE (512 * 1024)
+
 typedef struct {
     uint32_t magic;
     uint32_t version;
     unsigned char uuid[16]; /* QemuUUID */
     uint8_t id;
+    uint8_t unused1[7];     /* Reserved for future use */
+    uint64_t unused2[4];    /* Reserved for future use */
 } __attribute__((packed)) MultiFDInit_t;
 
 typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t flags;
-    uint32_t size;
-    uint32_t used;
+    /* maximum number of allocated pages */
+    uint32_t pages_alloc;
+    uint32_t pages_used;
+    /* size of the next packet that contains pages */
+    uint32_t next_packet_size;
     uint64_t packet_num;
+    uint64_t unused[4];    /* Reserved for future use */
     char ramblock[256];
     uint64_t offset[];
 } __attribute__((packed)) MultiFDPacket_t;
@@ -643,6 +652,8 @@ typedef struct {
     MultiFDPacket_t *packet;
     /* multifd flags for each packet */
     uint32_t flags;
+    /* size of the next packet that contains pages */
+    uint32_t next_packet_size;
     /* global number of generated multifd packets */
     uint64_t packet_num;
     /* thread local variables */
@@ -650,8 +661,6 @@ typedef struct {
     uint64_t num_packets;
     /* pages sent through this channel */
     uint64_t num_pages;
-    /* syncs main thread and channels */
-    QemuSemaphore sem_sync;
 }  MultiFDSendParams;
 
 typedef struct {
@@ -679,6 +688,8 @@ typedef struct {
     /* global number of generated multifd packets */
     uint64_t packet_num;
     /* thread local variables */
+    /* size of the next packet that contains pages */
+    uint32_t next_packet_size;
     /* packets sent through this channel */
     uint64_t num_packets;
     /* pages sent through this channel */
@@ -776,13 +787,15 @@ static void multifd_pages_clear(MultiFDPages_t *pages)
 static void multifd_send_fill_packet(MultiFDSendParams *p)
 {
     MultiFDPacket_t *packet = p->packet;
+    uint32_t page_max = MULTIFD_PACKET_SIZE / qemu_target_page_size();
     int i;
 
     packet->magic = cpu_to_be32(MULTIFD_MAGIC);
     packet->version = cpu_to_be32(MULTIFD_VERSION);
     packet->flags = cpu_to_be32(p->flags);
-    packet->size = cpu_to_be32(migrate_multifd_page_count());
-    packet->used = cpu_to_be32(p->pages->used);
+    packet->pages_alloc = cpu_to_be32(page_max);
+    packet->pages_used = cpu_to_be32(p->pages->used);
+    packet->next_packet_size = cpu_to_be32(p->next_packet_size);
     packet->packet_num = cpu_to_be64(p->packet_num);
 
     if (p->pages->block) {
@@ -797,6 +810,7 @@ static void multifd_send_fill_packet(MultiFDSendParams *p)
 static int multifd_recv_unfill_packet(MultiFDRecvParams *p, Error **errp)
 {
     MultiFDPacket_t *packet = p->packet;
+    uint32_t pages_max = MULTIFD_PACKET_SIZE / qemu_target_page_size();
     RAMBlock *block;
     int i;
 
@@ -818,22 +832,35 @@ static int multifd_recv_unfill_packet(MultiFDRecvParams *p, Error **errp)
 
     p->flags = be32_to_cpu(packet->flags);
 
-    packet->size = be32_to_cpu(packet->size);
-    if (packet->size > migrate_multifd_page_count()) {
+    packet->pages_alloc = be32_to_cpu(packet->pages_alloc);
+    /*
+     * If we recevied a packet that is 100 times bigger than expected
+     * just stop migration.  It is a magic number.
+     */
+    if (packet->pages_alloc > pages_max * 100) {
         error_setg(errp, "multifd: received packet "
-                   "with size %d and expected maximum size %d",
-                   packet->size, migrate_multifd_page_count()) ;
+                   "with size %d and expected a maximum size of %d",
+                   packet->pages_alloc, pages_max * 100) ;
+        return -1;
+    }
+    /*
+     * We received a packet that is bigger than expected but inside
+     * reasonable limits (see previous comment).  Just reallocate.
+     */
+    if (packet->pages_alloc > p->pages->allocated) {
+        multifd_pages_clear(p->pages);
+        p->pages = multifd_pages_init(packet->pages_alloc);
+    }
+
+    p->pages->used = be32_to_cpu(packet->pages_used);
+    if (p->pages->used > packet->pages_alloc) {
+        error_setg(errp, "multifd: received packet "
+                   "with %d pages and expected maximum pages are %d",
+                   p->pages->used, packet->pages_alloc) ;
         return -1;
     }
 
-    p->pages->used = be32_to_cpu(packet->used);
-    if (p->pages->used > packet->size) {
-        error_setg(errp, "multifd: received packet "
-                   "with size %d and expected maximum size %d",
-                   p->pages->used, packet->size) ;
-        return -1;
-    }
-
+    p->next_packet_size = be32_to_cpu(packet->next_packet_size);
     p->packet_num = be64_to_cpu(packet->packet_num);
 
     if (p->pages->used) {
@@ -865,8 +892,6 @@ static int multifd_recv_unfill_packet(MultiFDRecvParams *p, Error **errp)
 
 struct {
     MultiFDSendParams *params;
-    /* number of created threads */
-    int count;
     /* array of pages to sent */
     MultiFDPages_t *pages;
     /* syncs main thread and channels */
@@ -888,7 +913,7 @@ struct {
  *    - to make easier to know what to free at the end of migration
  *
  * This way we always know who is the owner of each "pages" struct,
- * and we don't need any loocking.  It belongs to the migration thread
+ * and we don't need any locking.  It belongs to the migration thread
  * or to the channel thread.  Switching is safe because the migration
  * thread is using the channel mutex when changing it, and the channel
  * have to had finish with its own, otherwise pending_job can't be
@@ -998,7 +1023,6 @@ void multifd_save_cleanup(void)
         p->c = NULL;
         qemu_mutex_destroy(&p->mutex);
         qemu_sem_destroy(&p->sem);
-        qemu_sem_destroy(&p->sem_sync);
         g_free(p->name);
         p->name = NULL;
         multifd_pages_clear(p->pages);
@@ -1073,6 +1097,7 @@ static void *multifd_send_thread(void *opaque)
             uint64_t packet_num = p->packet_num;
             uint32_t flags = p->flags;
 
+            p->next_packet_size = used * qemu_target_page_size();
             multifd_send_fill_packet(p);
             p->flags = 0;
             p->num_packets++;
@@ -1080,7 +1105,8 @@ static void *multifd_send_thread(void *opaque)
             p->pages->used = 0;
             qemu_mutex_unlock(&p->mutex);
 
-            trace_multifd_send(p->id, packet_num, used, flags);
+            trace_multifd_send(p->id, packet_num, used, flags,
+                               p->next_packet_size);
 
             ret = qio_channel_write_all(p->c, (void *)p->packet,
                                         p->packet_len, &local_err);
@@ -1088,9 +1114,12 @@ static void *multifd_send_thread(void *opaque)
                 break;
             }
 
-            ret = qio_channel_writev_all(p->c, p->pages->iov, used, &local_err);
-            if (ret != 0) {
-                break;
+            if (used) {
+                ret = qio_channel_writev_all(p->c, p->pages->iov,
+                                             used, &local_err);
+                if (ret != 0) {
+                    break;
+                }
             }
 
             qemu_mutex_lock(&p->mutex);
@@ -1140,15 +1169,13 @@ static void multifd_new_send_channel_async(QIOTask *task, gpointer opaque)
         p->running = true;
         qemu_thread_create(&p->thread, p->name, multifd_send_thread, p,
                            QEMU_THREAD_JOINABLE);
-
-        atomic_inc(&multifd_send_state->count);
     }
 }
 
 int multifd_save_setup(void)
 {
     int thread_count;
-    uint32_t page_count = migrate_multifd_page_count();
+    uint32_t page_count = MULTIFD_PACKET_SIZE / qemu_target_page_size();
     uint8_t i;
 
     if (!migrate_use_multifd()) {
@@ -1157,7 +1184,6 @@ int multifd_save_setup(void)
     thread_count = migrate_multifd_channels();
     multifd_send_state = g_malloc0(sizeof(*multifd_send_state));
     multifd_send_state->params = g_new0(MultiFDSendParams, thread_count);
-    atomic_set(&multifd_send_state->count, 0);
     multifd_send_state->pages = multifd_pages_init(page_count);
     qemu_sem_init(&multifd_send_state->sem_sync, 0);
     qemu_sem_init(&multifd_send_state->channels_ready, 0);
@@ -1167,7 +1193,6 @@ int multifd_save_setup(void)
 
         qemu_mutex_init(&p->mutex);
         qemu_sem_init(&p->sem, 0);
-        qemu_sem_init(&p->sem_sync, 0);
         p->quit = false;
         p->pending_job = 0;
         p->id = i;
@@ -1312,14 +1337,18 @@ static void *multifd_recv_thread(void *opaque)
 
         used = p->pages->used;
         flags = p->flags;
-        trace_multifd_recv(p->id, p->packet_num, used, flags);
+        trace_multifd_recv(p->id, p->packet_num, used, flags,
+                           p->next_packet_size);
         p->num_packets++;
         p->num_pages += used;
         qemu_mutex_unlock(&p->mutex);
 
-        ret = qio_channel_readv_all(p->c, p->pages->iov, used, &local_err);
-        if (ret != 0) {
-            break;
+        if (used) {
+            ret = qio_channel_readv_all(p->c, p->pages->iov,
+                                        used, &local_err);
+            if (ret != 0) {
+                break;
+            }
         }
 
         if (flags & MULTIFD_FLAG_SYNC) {
@@ -1344,7 +1373,7 @@ static void *multifd_recv_thread(void *opaque)
 int multifd_load_setup(void)
 {
     int thread_count;
-    uint32_t page_count = migrate_multifd_page_count();
+    uint32_t page_count = MULTIFD_PACKET_SIZE / qemu_target_page_size();
     uint8_t i;
 
     if (!migrate_use_multifd()) {
@@ -1592,9 +1621,7 @@ static int save_xbzrle_page(RAMState *rs, uint8_t **current_data,
 /**
  * migration_bitmap_find_dirty: find the next dirty page from start
  *
- * Called with rcu_read_lock() to protect migration_bitmap
- *
- * Returns the byte offset within memory region of the start of a dirty page
+ * Returns the page offset within memory region of the start of a dirty page
  *
  * @rs: current RAM state
  * @rb: RAMBlock where to search for dirty pages
@@ -1643,10 +1670,10 @@ static inline bool migration_bitmap_clear_dirty(RAMState *rs,
 }
 
 static void migration_bitmap_sync_range(RAMState *rs, RAMBlock *rb,
-                                        ram_addr_t start, ram_addr_t length)
+                                        ram_addr_t length)
 {
     rs->migration_dirty_pages +=
-        cpu_physical_memory_sync_dirty_bitmap(rb, start, length,
+        cpu_physical_memory_sync_dirty_bitmap(rb, 0, length,
                                               &rs->num_dirty_pages_period);
 }
 
@@ -1735,7 +1762,7 @@ static void migration_bitmap_sync(RAMState *rs)
     qemu_mutex_lock(&rs->bitmap_mutex);
     rcu_read_lock();
     RAMBLOCK_FOREACH_NOT_IGNORED(block) {
-        migration_bitmap_sync_range(rs, block, 0, block->used_length);
+        migration_bitmap_sync_range(rs, block, block->used_length);
     }
     ram_counters.remaining = ram_bytes_remaining();
     rcu_read_unlock();
@@ -2108,7 +2135,7 @@ retry:
  * find_dirty_block: find the next dirty page and update any state
  * associated with the search process.
  *
- * Returns if a page is found
+ * Returns true if a page is found
  *
  * @rs: current RAM state
  * @pss: data about the state of the current dirty page scan
@@ -2200,11 +2227,11 @@ static RAMBlock *unqueue_page(RAMState *rs, ram_addr_t *offset)
 }
 
 /**
- * get_queued_page: unqueue a page from the postocpy requests
+ * get_queued_page: unqueue a page from the postcopy requests
  *
  * Skips pages that are already sent (!dirty)
  *
- * Returns if a queued page is found
+ * Returns true if a queued page is found
  *
  * @rs: current RAM state
  * @pss: data about the state of the current dirty page scan
@@ -2643,7 +2670,7 @@ static void ram_save_cleanup(void *opaque)
     RAMBlock *block;
 
     /* caller have hold iothread lock or is in a bh, so there is
-     * no writing race against this migration_bitmap
+     * no writing race against the migration bitmap
      */
     memory_global_dirty_log_stop();
 
@@ -3146,11 +3173,11 @@ static int ram_state_init(RAMState **rsp)
     QSIMPLEQ_INIT(&(*rsp)->src_page_requests);
 
     /*
-     * Count the total number of pages used by ram blocks not including any
-     * gaps due to alignment or unplugs.
+     * This must match with the initial values of dirty bitmap.
+     * Currently we initialize the dirty bitmap to all zeros so
+     * here the total dirty page count is zero.
      */
-    (*rsp)->migration_dirty_pages = ram_bytes_total() >> TARGET_PAGE_BITS;
-
+    (*rsp)->migration_dirty_pages = 0;
     ram_state_reset(*rsp);
 
     return 0;
@@ -3165,8 +3192,16 @@ static void ram_list_init_bitmaps(void)
     if (ram_bytes_total()) {
         RAMBLOCK_FOREACH_NOT_IGNORED(block) {
             pages = block->max_length >> TARGET_PAGE_BITS;
+            /*
+             * The initial dirty bitmap for migration must be set with all
+             * ones to make sure we'll migrate every guest RAM page to
+             * destination.
+             * Here we didn't set RAMBlock.bmap simply because it is already
+             * set in ram_list.dirty_memory[DIRTY_MEMORY_MIGRATION] in
+             * ram_block_add, and that's where we'll sync the dirty bitmaps.
+             * Here setting RAMBlock.bmap would be fine too but not necessary.
+             */
             block->bmap = bitmap_new(pages);
-            bitmap_set(block->bmap, 0, pages);
             if (migrate_postcopy_ram()) {
                 block->unsentmap = bitmap_new(pages);
                 bitmap_set(block->unsentmap, 0, pages);
@@ -3411,7 +3446,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
         /* we want to check in the 1st loop, just in case it was the 1st time
            and we had to sync the dirty bitmap.
-           qemu_get_clock_ns() is a bit expensive, so we only check each some
+           qemu_clock_get_ns() is a bit expensive, so we only check each some
            iterations
         */
         if ((i & 63) == 0) {
@@ -3880,6 +3915,7 @@ int colo_init_ram_cache(void)
     }
     ram_state = g_new0(RAMState, 1);
     ram_state->migration_dirty_pages = 0;
+    qemu_mutex_init(&ram_state->bitmap_mutex);
     memory_global_dirty_log_start();
 
     return 0;
@@ -3918,6 +3954,7 @@ void colo_release_ram_cache(void)
     }
 
     rcu_read_unlock();
+    qemu_mutex_destroy(&ram_state->bitmap_mutex);
     g_free(ram_state);
     ram_state = NULL;
 }
@@ -4156,7 +4193,7 @@ static void colo_flush_ram_cache(void)
     memory_global_dirty_log_sync();
     rcu_read_lock();
     RAMBLOCK_FOREACH_NOT_IGNORED(block) {
-        migration_bitmap_sync_range(ram_state, block, 0, block->used_length);
+        migration_bitmap_sync_range(ram_state, block, block->used_length);
     }
     rcu_read_unlock();
 

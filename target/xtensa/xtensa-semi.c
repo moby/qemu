@@ -29,7 +29,7 @@
 #include "cpu.h"
 #include "chardev/char-fe.h"
 #include "exec/helper-proto.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "sysemu/sysemu.h"
@@ -202,7 +202,6 @@ void HELPER(simcall)(CPUXtensaState *env)
 
     switch (regs[2]) {
     case TARGET_SYS_exit:
-        qemu_log("exit(%d) simcall\n", regs[3]);
         exit(regs[3]);
         break;
 

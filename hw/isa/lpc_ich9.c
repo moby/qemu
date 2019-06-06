@@ -412,7 +412,7 @@ void ich9_lpc_pm_init(PCIDevice *lpc_pci, bool smm_enabled)
                                  true);
     }
 
-    ich9_lpc_reset(&lpc->d.qdev);
+    ich9_lpc_reset(DEVICE(lpc));
 }
 
 /* APM */
@@ -623,17 +623,6 @@ static const MemoryRegionOps ich9_rst_cnt_ops = {
     .write = ich9_rst_cnt_write,
     .endianness = DEVICE_LITTLE_ENDIAN
 };
-
-Object *ich9_lpc_find(void)
-{
-    bool ambig;
-    Object *o = object_resolve_path_type("", TYPE_ICH9_LPC_DEVICE, &ambig);
-
-    if (ambig) {
-        return NULL;
-    }
-    return o;
-}
 
 static void ich9_lpc_get_sci_int(Object *obj, Visitor *v, const char *name,
                                  void *opaque, Error **errp)

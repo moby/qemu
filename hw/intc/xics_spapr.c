@@ -95,8 +95,15 @@ static target_ulong h_eoi(PowerPCCPU *cpu, SpaprMachineState *spapr,
 static target_ulong h_ipoll(PowerPCCPU *cpu, SpaprMachineState *spapr,
                             target_ulong opcode, target_ulong *args)
 {
+    ICPState *icp = xics_icp_get(XICS_FABRIC(spapr), args[0]);
     uint32_t mfrr;
-    uint32_t xirr = icp_ipoll(spapr_cpu_state(cpu)->icp, &mfrr);
+    uint32_t xirr;
+
+    if (!icp) {
+        return H_PARAMETER;
+    }
+
+    xirr = icp_ipoll(icp, &mfrr);
 
     args[0] = xirr;
     args[1] = mfrr;
@@ -232,6 +239,13 @@ static void rtas_int_on(PowerPCCPU *cpu, SpaprMachineState *spapr,
 
 void xics_spapr_init(SpaprMachineState *spapr)
 {
+    /* Emulated mode can only be initialized once. */
+    if (spapr->ics->init) {
+        return;
+    }
+
+    spapr->ics->init = true;
+
     /* Registration of global state belongs into realize */
     spapr_rtas_register(RTAS_IBM_SET_XIVE, "ibm,set-xive", rtas_set_xive);
     spapr_rtas_register(RTAS_IBM_GET_XIVE, "ibm,get-xive", rtas_get_xive);

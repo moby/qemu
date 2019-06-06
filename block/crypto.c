@@ -257,7 +257,8 @@ static int block_crypto_co_create_generic(BlockDriverState *bs,
     QCryptoBlock *crypto = NULL;
     struct BlockCryptoCreateData data;
 
-    blk = blk_new(BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
+    blk = blk_new(bdrv_get_aio_context(bs),
+                  BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
 
     ret = blk_insert_bs(blk, bs, errp);
     if (ret < 0) {
@@ -625,7 +626,7 @@ static const char *const block_crypto_strong_runtime_opts[] = {
     NULL
 };
 
-BlockDriver bdrv_crypto_luks = {
+static BlockDriver bdrv_crypto_luks = {
     .format_name        = "luks",
     .instance_size      = sizeof(BlockCrypto),
     .bdrv_probe         = block_crypto_probe_luks,

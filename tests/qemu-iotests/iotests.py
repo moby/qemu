@@ -126,6 +126,11 @@ def qemu_img_pipe(*args):
         sys.stderr.write('qemu-img received signal %i: %s\n' % (-exitcode, ' '.join(qemu_img_args + list(args))))
     return subp.communicate()[0]
 
+def qemu_img_log(*args):
+    result = qemu_img_pipe(*args)
+    log(result, filters=[filter_testfiles])
+    return result
+
 def img_info_log(filename, filter_path=None, imgopts=False, extra_args=[]):
     args = [ 'info' ]
     if imgopts:
@@ -411,7 +416,7 @@ def remote_filename(path):
     if imgproto == 'file':
         return path
     elif imgproto == 'ssh':
-        return "ssh://127.0.0.1%s" % (path)
+        return "ssh://%s@127.0.0.1:22%s" % (os.environ.get('USER'), path)
     else:
         raise Exception("Protocol %s not supported" % (imgproto))
 
@@ -533,7 +538,8 @@ class VM(qtest.QEMUQtestMachine):
         return result
 
     # Returns None on success, and an error string on failure
-    def run_job(self, job, auto_finalize=True, auto_dismiss=False):
+    def run_job(self, job, auto_finalize=True, auto_dismiss=False,
+                pre_finalize=None):
         error = None
         while True:
             for ev in self.get_qmp_events_filtered(wait=True):
@@ -546,13 +552,15 @@ class VM(qtest.QEMUQtestMachine):
                                 error = j['error']
                                 log('Job failed: %s' % (j['error']))
                     elif status == 'pending' and not auto_finalize:
+                        if pre_finalize:
+                            pre_finalize()
                         self.qmp_log('job-finalize', id=job)
                     elif status == 'concluded' and not auto_dismiss:
                         self.qmp_log('job-dismiss', id=job)
                     elif status == 'null':
                         return error
                 else:
-                    iotests.log(ev)
+                    log(ev)
 
     def node_info(self, node_name):
         nodes = self.qmp('query-named-block-nodes')
@@ -596,9 +604,23 @@ class QMPTestCase(unittest.TestCase):
         self.fail('path "%s" has value "%s"' % (path, str(result)))
 
     def assert_qmp(self, d, path, value):
-        '''Assert that the value for a specific path in a QMP dict matches'''
+        '''Assert that the value for a specific path in a QMP dict
+           matches.  When given a list of values, assert that any of
+           them matches.'''
+
         result = self.dictpath(d, path)
-        self.assertEqual(result, value, 'values not equal "%s" and "%s"' % (str(result), str(value)))
+
+        # [] makes no sense as a list of valid values, so treat it as
+        # an actual single value.
+        if isinstance(value, list) and value != []:
+            for v in value:
+                if result == v:
+                    return
+            self.fail('no match for "%s" in %s' % (str(result), str(value)))
+        else:
+            self.assertEqual(result, value,
+                             'values not equal "%s" and "%s"'
+                                 % (str(result), str(value)))
 
     def assert_no_active_block_jobs(self):
         result = self.vm.qmp('query-block-jobs')

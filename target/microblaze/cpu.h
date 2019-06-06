@@ -328,8 +328,7 @@ static inline MicroBlazeCPU *mb_env_get_cpu(CPUMBState *env)
 
 void mb_cpu_do_interrupt(CPUState *cs);
 bool mb_cpu_exec_interrupt(CPUState *cs, int int_req);
-void mb_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                       int flags);
+void mb_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr mb_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int mb_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int mb_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
@@ -375,8 +374,9 @@ static inline int cpu_mmu_index (CPUMBState *env, bool ifetch)
     return MMU_KERNEL_IDX;
 }
 
-int mb_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int size, int rw,
-                            int mmu_idx);
+bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                     MMUAccessType access_type, int mmu_idx,
+                     bool probe, uintptr_t retaddr);
 
 #include "exec/cpu-all.h"
 

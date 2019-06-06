@@ -116,7 +116,7 @@ int main(int argc, char **argv)
 #include "qapi/opts-visitor.h"
 #include "qapi/clone-visitor.h"
 #include "qom/object_interfaces.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 #include "crypto/init.h"
 #include "sysemu/replay.h"
 #include "qapi/qapi-events-run-state.h"
@@ -128,6 +128,7 @@ int main(int argc, char **argv)
 #include "qapi/qapi-commands-ui.h"
 #include "qapi/qmp/qerror.h"
 #include "sysemu/iothread.h"
+#include "qemu/guest-random.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 
@@ -185,6 +186,7 @@ const char *prom_envs[MAX_PROM_ENVS];
 int boot_menu;
 bool boot_strict;
 uint8_t *boot_splash_filedata;
+int only_migratable; /* turn it off unless user states otherwise */
 bool wakeup_suspend_enabled;
 
 int icount_align_option;
@@ -237,6 +239,7 @@ static struct {
     { .driver = "qxl-vga",              .flag = &default_vga       },
     { .driver = "virtio-vga",           .flag = &default_vga       },
     { .driver = "ati-vga",              .flag = &default_vga       },
+    { .driver = "vhost-user-vga",       .flag = &default_vga       },
 };
 
 static QemuOptsList qemu_rtc_opts = {
@@ -499,25 +502,6 @@ static QemuOptsList qemu_icount_opts = {
     },
 };
 
-static QemuOptsList qemu_semihosting_config_opts = {
-    .name = "semihosting-config",
-    .implied_opt_name = "enable",
-    .head = QTAILQ_HEAD_INITIALIZER(qemu_semihosting_config_opts.head),
-    .desc = {
-        {
-            .name = "enable",
-            .type = QEMU_OPT_BOOL,
-        }, {
-            .name = "target",
-            .type = QEMU_OPT_STRING,
-        }, {
-            .name = "arg",
-            .type = QEMU_OPT_STRING,
-        },
-        { /* end of list */ }
-    },
-};
-
 static QemuOptsList qemu_fw_cfg_opts = {
     .name = "fw_cfg",
     .implied_opt_name = "name",
@@ -724,7 +708,7 @@ void runstate_set(RunState new_state)
     assert(new_state < RUN_STATE__MAX);
 
     trace_runstate_set(current_run_state, RunState_str(current_run_state),
-                       new_state, RunState_str(current_run_state));
+                       new_state, RunState_str(new_state));
 
     if (current_run_state == new_state) {
         return;
@@ -1349,80 +1333,6 @@ static void configure_msg(QemuOpts *opts)
     enable_timestamp_msg = qemu_opt_get_bool(opts, "timestamp", true);
 }
 
-/***********************************************************/
-/* Semihosting */
-
-typedef struct SemihostingConfig {
-    bool enabled;
-    SemihostingTarget target;
-    const char **argv;
-    int argc;
-    const char *cmdline; /* concatenated argv */
-} SemihostingConfig;
-
-static SemihostingConfig semihosting;
-
-bool semihosting_enabled(void)
-{
-    return semihosting.enabled;
-}
-
-SemihostingTarget semihosting_get_target(void)
-{
-    return semihosting.target;
-}
-
-const char *semihosting_get_arg(int i)
-{
-    if (i >= semihosting.argc) {
-        return NULL;
-    }
-    return semihosting.argv[i];
-}
-
-int semihosting_get_argc(void)
-{
-    return semihosting.argc;
-}
-
-const char *semihosting_get_cmdline(void)
-{
-    if (semihosting.cmdline == NULL && semihosting.argc > 0) {
-        semihosting.cmdline = g_strjoinv(" ", (gchar **)semihosting.argv);
-    }
-    return semihosting.cmdline;
-}
-
-static int add_semihosting_arg(void *opaque,
-                               const char *name, const char *val,
-                               Error **errp)
-{
-    SemihostingConfig *s = opaque;
-    if (strcmp(name, "arg") == 0) {
-        s->argc++;
-        /* one extra element as g_strjoinv() expects NULL-terminated array */
-        s->argv = g_realloc(s->argv, (s->argc + 1) * sizeof(void *));
-        s->argv[s->argc - 1] = val;
-        s->argv[s->argc] = NULL;
-    }
-    return 0;
-}
-
-/* Use strings passed via -kernel/-append to initialize semihosting.argv[] */
-static inline void semihosting_arg_fallback(const char *file, const char *cmd)
-{
-    char *cmd_token;
-
-    /* argv[0] */
-    add_semihosting_arg(&semihosting, "arg", file, NULL);
-
-    /* split -append and initialize argv[1..n] */
-    cmd_token = strtok(g_strdup(cmd), " ");
-    while (cmd_token) {
-        add_semihosting_arg(&semihosting, "arg", cmd_token, NULL);
-        cmd_token = strtok(NULL, " ");
-    }
-}
 
 /* Now we still need this for compatibility with XEN. */
 bool has_igd_gfx_passthru;
@@ -1464,45 +1374,34 @@ static int usb_parse(const char *cmdline)
 
 MachineState *current_machine;
 
-static MachineClass *find_machine(const char *name)
+static MachineClass *find_machine(const char *name, GSList *machines)
 {
-    GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
-    MachineClass *mc = NULL;
+    GSList *el;
 
     for (el = machines; el; el = el->next) {
-        MachineClass *temp = el->data;
+        MachineClass *mc = el->data;
 
-        if (!strcmp(temp->name, name)) {
-            mc = temp;
-            break;
-        }
-        if (temp->alias &&
-            !strcmp(temp->alias, name)) {
-            mc = temp;
-            break;
+        if (!strcmp(mc->name, name) || !g_strcmp0(mc->alias, name)) {
+            return mc;
         }
     }
 
-    g_slist_free(machines);
-    return mc;
+    return NULL;
 }
 
-MachineClass *find_default_machine(void)
+static MachineClass *find_default_machine(GSList *machines)
 {
-    GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
-    MachineClass *mc = NULL;
+    GSList *el;
 
     for (el = machines; el; el = el->next) {
-        MachineClass *temp = el->data;
+        MachineClass *mc = el->data;
 
-        if (temp->is_default) {
-            mc = temp;
-            break;
+        if (mc->is_default) {
+            return mc;
         }
     }
 
-    g_slist_free(machines);
-    return mc;
+    return NULL;
 }
 
 MachineInfoList *qmp_query_machines(Error **errp)
@@ -1555,12 +1454,12 @@ static int machine_help_func(QemuOpts *opts, MachineState *machine)
             continue;
         }
 
-        error_printf("%s.%s=%s", MACHINE_GET_CLASS(machine)->name,
-                     prop->name, prop->type);
+        printf("%s.%s=%s", MACHINE_GET_CLASS(machine)->name,
+               prop->name, prop->type);
         if (prop->description) {
-            error_printf(" (%s)\n", prop->description);
+            printf(" (%s)\n", prop->description);
         } else {
-            error_printf("\n");
+            printf("\n");
         }
     }
 
@@ -2025,9 +1924,10 @@ typedef struct VGAInterfaceInfo {
     const char *class_names[2];
 } VGAInterfaceInfo;
 
-static VGAInterfaceInfo vga_interfaces[VGA_TYPE_MAX] = {
+static const VGAInterfaceInfo vga_interfaces[VGA_TYPE_MAX] = {
     [VGA_NONE] = {
         .opt_name = "none",
+        .name = "no graphic card",
     },
     [VGA_STD] = {
         .opt_name = "std",
@@ -2066,12 +1966,13 @@ static VGAInterfaceInfo vga_interfaces[VGA_TYPE_MAX] = {
     },
     [VGA_XENFB] = {
         .opt_name = "xenfb",
+        .name = "Xen paravirtualized framebuffer",
     },
 };
 
 static bool vga_interface_available(VGAInterfaceType t)
 {
-    VGAInterfaceInfo *ti = &vga_interfaces[t];
+    const VGAInterfaceInfo *ti = &vga_interfaces[t];
 
     assert(t < VGA_TYPE_MAX);
     return !ti->class_names[0] ||
@@ -2079,14 +1980,42 @@ static bool vga_interface_available(VGAInterfaceType t)
            object_class_by_name(ti->class_names[1]);
 }
 
-static void select_vgahw(const char *p)
+static const char *
+get_default_vga_model(const MachineClass *machine_class)
+{
+    if (machine_class->default_display) {
+        return machine_class->default_display;
+    } else if (vga_interface_available(VGA_CIRRUS)) {
+        return "cirrus";
+    } else if (vga_interface_available(VGA_STD)) {
+        return "std";
+    }
+
+    return NULL;
+}
+
+static void select_vgahw(const MachineClass *machine_class, const char *p)
 {
     const char *opts;
     int t;
 
+    if (g_str_equal(p, "help")) {
+        const char *def = get_default_vga_model(machine_class);
+
+        for (t = 0; t < VGA_TYPE_MAX; t++) {
+            const VGAInterfaceInfo *ti = &vga_interfaces[t];
+
+            if (vga_interface_available(t) && ti->opt_name) {
+                printf("%-20s %s%s\n", ti->opt_name, ti->name ?: "",
+                       g_str_equal(ti->opt_name, def) ? " (default)" : "");
+            }
+        }
+        exit(0);
+    }
+
     assert(vga_interface_type == VGA_NONE);
     for (t = 0; t < VGA_TYPE_MAX; t++) {
-        VGAInterfaceInfo *ti = &vga_interfaces[t];
+        const VGAInterfaceInfo *ti = &vga_interfaces[t];
         if (ti->opt_name && strstart(p, ti->opt_name, &opts)) {
             if (!vga_interface_available(t)) {
                 error_report("%s not available", ti->name);
@@ -2584,22 +2513,12 @@ static gint machine_class_cmp(gconstpointer a, gconstpointer b)
                   object_class_get_name(OBJECT_CLASS(mc1)));
 }
 
- static MachineClass *machine_parse(const char *name)
+static MachineClass *machine_parse(const char *name, GSList *machines)
 {
-    MachineClass *mc = NULL;
-    GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
+    MachineClass *mc;
+    GSList *el;
 
-    if (name) {
-        mc = find_machine(name);
-    }
-    if (mc) {
-        g_slist_free(machines);
-        return mc;
-    }
-    if (name && !is_help_option(name)) {
-        error_report("unsupported machine type");
-        error_printf("Use -machine help to list supported machines\n");
-    } else {
+    if (is_help_option(name)) {
         printf("Supported machines are:\n");
         machines = g_slist_sort(machines, machine_class_cmp);
         for (el = machines; el; el = el->next) {
@@ -2611,10 +2530,16 @@ static gint machine_class_cmp(gconstpointer a, gconstpointer b)
                    mc->is_default ? " (default)" : "",
                    mc->deprecation_reason ? " (deprecated)" : "");
         }
+        exit(0);
     }
 
-    g_slist_free(machines);
-    exit(!name || !is_help_option(name));
+    mc = find_machine(name, machines);
+    if (!mc) {
+        error_report("unsupported machine type");
+        error_printf("Use -machine help to list supported machines\n");
+        exit(1);
+    }
+    return mc;
 }
 
 void qemu_add_exit_notifier(Notifier *notify)
@@ -2705,7 +2630,8 @@ static const QEMUOption *lookup_opt(int argc, char **argv,
 
 static MachineClass *select_machine(void)
 {
-    MachineClass *machine_class = find_default_machine();
+    GSList *machines = object_class_get_list(TYPE_MACHINE, false);
+    MachineClass *machine_class = find_default_machine(machines);
     const char *optarg;
     QemuOpts *opts;
     Location loc;
@@ -2717,7 +2643,7 @@ static MachineClass *select_machine(void)
 
     optarg = qemu_opt_get(opts, "type");
     if (optarg) {
-        machine_class = machine_parse(optarg);
+        machine_class = machine_parse(optarg, machines);
     }
 
     if (!machine_class) {
@@ -2727,6 +2653,7 @@ static MachineClass *select_machine(void)
     }
 
     loc_pop(&loc);
+    g_slist_free(machines);
     return machine_class;
 }
 
@@ -2824,20 +2751,25 @@ static bool object_create_initial(const char *type, QemuOpts *opts)
         exit(0);
     }
 
-    if (g_str_equal(type, "rng-egd") ||
-        g_str_has_prefix(type, "pr-manager-")) {
+    /*
+     * Objects should not be made "delayed" without a reason.  If you
+     * add one, state the reason in a comment!
+     */
+
+    /* Reason: rng-egd property "chardev" */
+    if (g_str_equal(type, "rng-egd")) {
         return false;
     }
 
 #if defined(CONFIG_VHOST_USER) && defined(CONFIG_LINUX)
+    /* Reason: cryptodev-vhost-user property "chardev" */
     if (g_str_equal(type, "cryptodev-vhost-user")) {
         return false;
     }
 #endif
 
     /*
-     * return false for concrete netfilters since
-     * they depend on netdevs already existing
+     * Reason: filter-* property "netdev" etc.
      */
     if (g_str_equal(type, "filter-buffer") ||
         g_str_equal(type, "filter-dump") ||
@@ -3001,7 +2933,7 @@ int main(int argc, char **argv, char **envp)
     const char *optarg;
     const char *loadvm = NULL;
     MachineClass *machine_class;
-    const char *cpu_model;
+    const char *cpu_option;
     const char *vga_model = NULL;
     const char *qtest_chrdev = NULL;
     const char *qtest_log = NULL;
@@ -3021,6 +2953,7 @@ int main(int argc, char **argv, char **envp)
     char *dir, **dirs;
     BlockdevOptionsQueue bdo_queue = QSIMPLEQ_HEAD_INITIALIZER(bdo_queue);
 
+    error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
 
     qemu_init_cpu_list();
@@ -3029,7 +2962,6 @@ int main(int argc, char **argv, char **envp)
     qemu_mutex_lock_iothread();
 
     atexit(qemu_run_exit_notifiers);
-    error_set_progname(argv[0]);
     qemu_init_exec_dir(argv[0]);
 
     module_call_init(MODULE_INIT_QOM);
@@ -3080,7 +3012,7 @@ int main(int argc, char **argv, char **envp)
     QLIST_INIT (&vm_change_state_head);
     os_setup_early_signal_handling();
 
-    cpu_model = NULL;
+    cpu_option = NULL;
     snapshot = 0;
 
     nb_nics = 0;
@@ -3119,6 +3051,7 @@ int main(int argc, char **argv, char **envp)
         if (optind >= argc)
             break;
         if (argv[optind][0] != '-') {
+            loc_set_cmdline(argv, optind, 1);
             drive_add(IF_DEFAULT, 0, argv[optind++], HD_OPTS);
         } else {
             const QEMUOption *popt;
@@ -3131,7 +3064,7 @@ int main(int argc, char **argv, char **envp)
             switch(popt->index) {
             case QEMU_OPTION_cpu:
                 /* hw initialization will check this */
-                cpu_model = optarg;
+                cpu_option = optarg;
                 break;
             case QEMU_OPTION_hda:
             case QEMU_OPTION_hdb:
@@ -3330,6 +3263,9 @@ int main(int argc, char **argv, char **envp)
             case QEMU_OPTION_DFILTER:
                 qemu_set_dfilter_ranges(optarg, &error_fatal);
                 break;
+            case QEMU_OPTION_seed:
+                qemu_guest_random_seed_main(optarg, &error_fatal);
+                break;
             case QEMU_OPTION_s:
                 add_device_config(DEV_GDB, "tcp::" DEFAULT_GDBSTUB_PORT);
                 break;
@@ -3518,6 +3454,10 @@ int main(int argc, char **argv, char **envp)
                 QemuOpts *fsdev;
                 QemuOpts *device;
 
+                warn_report("'-virtfs_synth' is deprecated, please use "
+                             "'-fsdev synth' and '-device virtio-9p-...' "
+                            "instead");
+
                 fsdev = qemu_opts_create(qemu_find_opts("fsdev"), "v_synth",
                                          1, NULL);
                 if (!fsdev) {
@@ -3641,7 +3581,23 @@ int main(int argc, char **argv, char **envp)
                                                      optarg, true);
                 optarg = qemu_opt_get(accel_opts, "accel");
                 if (!optarg || is_help_option(optarg)) {
-                    error_printf("Possible accelerators: kvm, xen, hax, tcg\n");
+                    printf("Accelerators supported in QEMU binary:\n");
+                    GSList *el, *accel_list = object_class_get_list(TYPE_ACCEL,
+                                                                    false);
+                    for (el = accel_list; el; el = el->next) {
+                        gchar *typename = g_strdup(object_class_get_name(
+                                                   OBJECT_CLASS(el->data)));
+                        /* omit qtest which is used for tests only */
+                        if (g_strcmp0(typename, ACCEL_CLASS_NAME("qtest")) &&
+                            g_str_has_suffix(typename, ACCEL_CLASS_SUFFIX)) {
+                            gchar **optname = g_strsplit(typename,
+                                                         ACCEL_CLASS_SUFFIX, 0);
+                            printf("%s\n", optname[0]);
+                            g_free(optname);
+                        }
+                        g_free(typename);
+                    }
+                    g_slist_free(accel_list);
                     exit(0);
                 }
                 opts = qemu_opts_create(qemu_find_opts("machine"), NULL,
@@ -3716,37 +3672,10 @@ int main(int argc, char **argv, char **envp)
                 nb_option_roms++;
                 break;
             case QEMU_OPTION_semihosting:
-                semihosting.enabled = true;
-                semihosting.target = SEMIHOSTING_TARGET_AUTO;
+                qemu_semihosting_enable();
                 break;
             case QEMU_OPTION_semihosting_config:
-                semihosting.enabled = true;
-                opts = qemu_opts_parse_noisily(qemu_find_opts("semihosting-config"),
-                                               optarg, false);
-                if (opts != NULL) {
-                    semihosting.enabled = qemu_opt_get_bool(opts, "enable",
-                                                            true);
-                    const char *target = qemu_opt_get(opts, "target");
-                    if (target != NULL) {
-                        if (strcmp("native", target) == 0) {
-                            semihosting.target = SEMIHOSTING_TARGET_NATIVE;
-                        } else if (strcmp("gdb", target) == 0) {
-                            semihosting.target = SEMIHOSTING_TARGET_GDB;
-                        } else  if (strcmp("auto", target) == 0) {
-                            semihosting.target = SEMIHOSTING_TARGET_AUTO;
-                        } else {
-                            error_report("unsupported semihosting-config %s",
-                                         optarg);
-                            exit(1);
-                        }
-                    } else {
-                        semihosting.target = SEMIHOSTING_TARGET_AUTO;
-                    }
-                    /* Set semihosting argument count and vector */
-                    qemu_opt_foreach(opts, add_semihosting_arg,
-                                     &semihosting, NULL);
-                } else {
-                    error_report("unsupported semihosting-config %s", optarg);
+                if (qemu_semihosting_config_options(optarg) != 0) {
                     exit(1);
                 }
                 break;
@@ -3799,13 +3728,7 @@ int main(int argc, char **argv, char **envp)
                 incoming = optarg;
                 break;
             case QEMU_OPTION_only_migratable:
-                /*
-                 * TODO: we can remove this option one day, and we
-                 * should all use:
-                 *
-                 * "-global migration.only-migratable=true"
-                 */
-                qemu_global_option("migration.only-migratable=true");
+                only_migratable = 1;
                 break;
             case QEMU_OPTION_nodefaults:
                 has_defaults = 0;
@@ -3883,17 +3806,19 @@ int main(int argc, char **argv, char **envp)
                 qtest_log = optarg;
                 break;
             case QEMU_OPTION_sandbox:
-#ifdef CONFIG_SECCOMP
-                opts = qemu_opts_parse_noisily(qemu_find_opts("sandbox"),
-                                               optarg, true);
+                olist = qemu_find_opts("sandbox");
+                if (!olist) {
+#ifndef CONFIG_SECCOMP
+                    error_report("-sandbox support is not enabled "
+                                 "in this QEMU binary");
+#endif
+                    exit(1);
+                }
+
+                opts = qemu_opts_parse_noisily(olist, optarg, true);
                 if (!opts) {
                     exit(1);
                 }
-#else
-                error_report("-sandbox support is not enabled "
-                             "in this QEMU binary");
-                exit(1);
-#endif
                 break;
             case QEMU_OPTION_add_fd:
 #ifndef _WIN32
@@ -3916,6 +3841,8 @@ int main(int argc, char **argv, char **envp)
                 }
                 break;
             case QEMU_OPTION_realtime:
+                warn_report("'-realtime mlock=...' is deprecated, please use "
+                             "'-overcommit mem-lock=...' instead");
                 opts = qemu_opts_parse_noisily(qemu_find_opts("realtime"),
                                                optarg, false);
                 if (!opts) {
@@ -4054,8 +3981,8 @@ int main(int argc, char **argv, char **envp)
         qemu_set_hw_version(machine_class->hw_version);
     }
 
-    if (cpu_model && is_help_option(cpu_model)) {
-        list_cpus(stdout, &fprintf, cpu_model);
+    if (cpu_option && is_help_option(cpu_option)) {
+        list_cpus(cpu_option);
         exit(0);
     }
 
@@ -4265,6 +4192,8 @@ int main(int argc, char **argv, char **envp)
 
     qemu_opts_foreach(qemu_find_opts("chardev"),
                       chardev_init_func, NULL, &error_fatal);
+    /* now chardevs have been created we may have semihosting to connect */
+    qemu_semihosting_connect_chardevs();
 
 #ifdef CONFIG_VIRTFS
     qemu_opts_foreach(qemu_find_opts("fsdev"),
@@ -4290,7 +4219,27 @@ int main(int argc, char **argv, char **envp)
     current_machine->maxram_size = maxram_size;
     current_machine->ram_slots = ram_slots;
 
+    /*
+     * Note: uses machine properties such as kernel-irqchip, must run
+     * after machine_set_property().
+     */
     configure_accelerator(current_machine, argv[0]);
+
+    /*
+     * Beware, QOM objects created before this point miss global and
+     * compat properties.
+     *
+     * Global properties get set up by qdev_prop_register_global(),
+     * called from user_register_global_props(), and certain option
+     * desugaring.  Also in CPU feature desugaring (buried in
+     * parse_cpu_option()), which happens below this point, but may
+     * only target the CPU type, which can only be created after
+     * parse_cpu_option() returned the type.
+     *
+     * Machine compat properties: object_set_machine_compat_props().
+     * Accelerator compat props: object_set_accelerator_compat_props(),
+     * called from configure_accelerator().
+     */
 
     if (!qtest_enabled() && machine_class->deprecation_reason) {
         error_report("Machine type '%s' is deprecated: %s",
@@ -4298,8 +4247,8 @@ int main(int argc, char **argv, char **envp)
     }
 
     /*
-     * Migration object can only be created after global properties
-     * are applied correctly.
+     * Note: creates a QOM object, must run only after global and
+     * compat properties have been set up.
      */
     migration_object_init();
 
@@ -4421,16 +4370,10 @@ int main(int argc, char **argv, char **envp)
 
     /* If no default VGA is requested, the default is "none".  */
     if (default_vga) {
-        if (machine_class->default_display) {
-            vga_model = machine_class->default_display;
-        } else if (vga_interface_available(VGA_CIRRUS)) {
-            vga_model = "cirrus";
-        } else if (vga_interface_available(VGA_STD)) {
-            vga_model = "std";
-        }
+        vga_model = get_default_vga_model(machine_class);
     }
     if (vga_model) {
-        select_vgahw(vga_model);
+        select_vgahw(machine_class, vga_model);
     }
 
     if (watchdog) {
@@ -4449,8 +4392,8 @@ int main(int argc, char **argv, char **envp)
 
     /* parse features once if machine provides default cpu_type */
     current_machine->cpu_type = machine_class->default_cpu_type;
-    if (cpu_model) {
-        current_machine->cpu_type = parse_cpu_model(cpu_model);
+    if (cpu_option) {
+        current_machine->cpu_type = parse_cpu_option(cpu_option);
     }
     parse_numa_opts(current_machine);
 

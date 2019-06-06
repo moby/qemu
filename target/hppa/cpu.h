@@ -272,7 +272,7 @@ void hppa_translate_init(void);
 
 #define CPU_RESOLVING_TYPE TYPE_HPPA_CPU
 
-void hppa_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void hppa_cpu_list(void);
 
 static inline target_ulong hppa_form_gva_psw(target_ureg psw, uint64_t spc,
                                              target_ureg off)
@@ -359,11 +359,11 @@ int hppa_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int hppa_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void hppa_cpu_do_interrupt(CPUState *cpu);
 bool hppa_cpu_exec_interrupt(CPUState *cpu, int int_req);
-void hppa_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function, int);
-#ifdef CONFIG_USER_ONLY
-int hppa_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int size,
-                              int rw, int midx);
-#else
+void hppa_cpu_dump_state(CPUState *cs, FILE *f, int);
+bool hppa_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr);
+#ifndef CONFIG_USER_ONLY
 int hppa_get_physical_address(CPUHPPAState *env, vaddr addr, int mmu_idx,
                               int type, hwaddr *pphys, int *pprot);
 extern const MemoryRegionOps hppa_io_eir_ops;

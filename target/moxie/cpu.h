@@ -112,8 +112,7 @@ static inline MoxieCPU *moxie_env_get_cpu(CPUMoxieState *env)
 #define ENV_OFFSET offsetof(MoxieCPU, env)
 
 void moxie_cpu_do_interrupt(CPUState *cs);
-void moxie_cpu_dump_state(CPUState *cpu, FILE *f,
-                          fprintf_function cpu_fprintf, int flags);
+void moxie_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr moxie_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 void moxie_translate_init(void);
 int cpu_moxie_signal_handler(int host_signum, void *pinfo,
@@ -140,7 +139,8 @@ static inline void cpu_get_tb_cpu_state(CPUMoxieState *env, target_ulong *pc,
     *flags = 0;
 }
 
-int moxie_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int size,
-                               int rw, int mmu_idx);
+bool moxie_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                        MMUAccessType access_type, int mmu_idx,
+                        bool probe, uintptr_t retaddr);
 
 #endif /* MOXIE_CPU_H */

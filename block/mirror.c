@@ -80,6 +80,7 @@ typedef struct MirrorBlockJob {
     bool initial_zeroing_ongoing;
     int in_active_write_counter;
     bool prepared;
+    bool in_drain;
 } MirrorBlockJob;
 
 typedef struct MirrorBDSOpaque {
@@ -683,6 +684,7 @@ static int mirror_exit_common(Job *job)
 
         /* The mirror job has no requests in flight any more, but we need to
          * drain potential other users of the BDS before changing the graph. */
+        assert(s->in_drain);
         bdrv_drained_begin(target_bs);
         bdrv_replace_node(to_replace, target_bs, &local_err);
         bdrv_drained_end(target_bs);
@@ -721,6 +723,7 @@ static int mirror_exit_common(Job *job)
     bs_opaque->job = NULL;
 
     bdrv_drained_end(src);
+    s->in_drain = false;
     bdrv_unref(mirror_top_bs);
     bdrv_unref(src);
 
@@ -1004,10 +1007,12 @@ static int coroutine_fn mirror_run(Job *job, Error **errp)
              */
             trace_mirror_before_drain(s, cnt);
 
+            s->in_drain = true;
             bdrv_drained_begin(bs);
             cnt = bdrv_get_dirty_count(s->dirty_bitmap);
             if (cnt > 0 || mirror_flush(s) < 0) {
                 bdrv_drained_end(bs);
+                s->in_drain = false;
                 continue;
             }
 
@@ -1055,6 +1060,7 @@ immediate_exit:
     bdrv_dirty_iter_free(s->dbi);
 
     if (need_drain) {
+        s->in_drain = true;
         bdrv_drained_begin(bs);
     }
 
@@ -1123,14 +1129,17 @@ static void coroutine_fn mirror_pause(Job *job)
 static bool mirror_drained_poll(BlockJob *job)
 {
     MirrorBlockJob *s = container_of(job, MirrorBlockJob, common);
+
+    /* If the job isn't paused nor cancelled, we can't be sure that it won't
+     * issue more requests. We make an exception if we've reached this point
+     * from one of our own drain sections, to avoid a deadlock waiting for
+     * ourselves.
+     */
+    if (!s->common.job.paused && !s->common.job.cancelled && !s->in_drain) {
+        return true;
+    }
+
     return !!s->in_flight;
-}
-
-static void mirror_attached_aio_context(BlockJob *job, AioContext *new_context)
-{
-    MirrorBlockJob *s = container_of(job, MirrorBlockJob, common);
-
-    blk_set_aio_context(s->target, new_context);
 }
 
 static void mirror_drain(BlockJob *job)
@@ -1162,7 +1171,6 @@ static const BlockJobDriver mirror_job_driver = {
         .complete               = mirror_complete,
     },
     .drained_poll           = mirror_drained_poll,
-    .attached_aio_context   = mirror_attached_aio_context,
     .drain                  = mirror_drain,
 };
 
@@ -1180,7 +1188,6 @@ static const BlockJobDriver commit_active_job_driver = {
         .complete               = mirror_complete,
     },
     .drained_poll           = mirror_drained_poll,
-    .attached_aio_context   = mirror_attached_aio_context,
     .drain                  = mirror_drain,
 };
 
@@ -1532,10 +1539,10 @@ static void mirror_start_job(const char *job_id, BlockDriverState *bs,
     }
     mirror_top_bs->total_sectors = bs->total_sectors;
     mirror_top_bs->supported_write_flags = BDRV_REQ_WRITE_UNCHANGED;
-    mirror_top_bs->supported_zero_flags = BDRV_REQ_WRITE_UNCHANGED;
+    mirror_top_bs->supported_zero_flags = BDRV_REQ_WRITE_UNCHANGED |
+                                          BDRV_REQ_NO_FALLBACK;
     bs_opaque = g_new0(MirrorBDSOpaque, 1);
     mirror_top_bs->opaque = bs_opaque;
-    bdrv_set_aio_context(mirror_top_bs, bdrv_get_aio_context(bs));
 
     /* bdrv_append takes ownership of the mirror_top_bs reference, need to keep
      * it alive until block_job_create() succeeds even if bs has no parent. */
@@ -1576,7 +1583,8 @@ static void mirror_start_job(const char *job_id, BlockDriverState *bs,
      * We can allow anything except resize there.*/
     target_is_backing = bdrv_chain_contains(bs, target);
     target_graph_mod = (backing_mode != MIRROR_LEAVE_BACKING_CHAIN);
-    s->target = blk_new(BLK_PERM_WRITE | BLK_PERM_RESIZE |
+    s->target = blk_new(s->common.job.aio_context,
+                        BLK_PERM_WRITE | BLK_PERM_RESIZE |
                         (target_graph_mod ? BLK_PERM_GRAPH_MOD : 0),
                         BLK_PERM_WRITE_UNCHANGED |
                         (target_is_backing ? BLK_PERM_CONSISTENT_READ |
@@ -1595,6 +1603,7 @@ static void mirror_start_job(const char *job_id, BlockDriverState *bs,
          * ensure that. */
         blk_set_force_allow_inactivate(s->target);
     }
+    blk_set_allow_aio_context_change(s->target, true);
 
     s->replaces = g_strdup(replaces);
     s->on_source_error = on_source_error;

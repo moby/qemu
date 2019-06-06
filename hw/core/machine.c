@@ -24,6 +24,12 @@
 #include "hw/pci/pci.h"
 #include "hw/mem/nvdimm.h"
 
+GlobalProperty hw_compat_4_0_1[] = {};
+const size_t hw_compat_4_0_1_len = G_N_ELEMENTS(hw_compat_4_0_1);
+
+GlobalProperty hw_compat_4_0[] = {};
+const size_t hw_compat_4_0_len = G_N_ELEMENTS(hw_compat_4_0);
+
 GlobalProperty hw_compat_3_1[] = {
     { "pcie-root-port", "x-speed", "2_5" },
     { "pcie-root-port", "x-width", "1" },
@@ -33,7 +39,7 @@ GlobalProperty hw_compat_3_1[] = {
     { "tpm-tis", "ppi", "false" },
     { "usb-kbd", "serial", "42" },
     { "usb-mouse", "serial", "42" },
-    { "usb-kbd", "serial", "42" },
+    { "usb-tablet", "serial", "42" },
     { "virtio-blk-device", "discard", "false" },
     { "virtio-blk-device", "write-zeroes", "false" },
 };
@@ -99,9 +105,26 @@ const size_t hw_compat_2_7_len = G_N_ELEMENTS(hw_compat_2_7);
 
 GlobalProperty hw_compat_2_6[] = {
     { "virtio-mmio", "format_transport_address", "off" },
-    /* Optional because not all virtio-pci devices support legacy mode */
-    { "virtio-pci", "disable-modern", "on",  .optional = true },
-    { "virtio-pci", "disable-legacy", "off", .optional = true },
+    /*
+     * don't include devices which are modern-only
+     * ie keyboard, mouse, tablet, gpu, vga & crypto
+     */
+    { "virtio-9p-pci", "disable-modern", "on" },
+    { "virtio-9p-pci", "disable-legacy", "off" },
+    { "virtio-balloon-pci", "disable-modern", "on" },
+    { "virtio-balloon-pci", "disable-legacy", "off" },
+    { "virtio-blk-pci", "disable-modern", "on" },
+    { "virtio-blk-pci", "disable-legacy", "off" },
+    { "virtio-input-host-pci", "disable-modern", "on" },
+    { "virtio-input-host-pci", "disable-legacy", "off" },
+    { "virtio-net-pci", "disable-modern", "on" },
+    { "virtio-net-pci", "disable-legacy", "off" },
+    { "virtio-rng-pci", "disable-modern", "on" },
+    { "virtio-rng-pci", "disable-legacy", "off" },
+    { "virtio-scsi-pci", "disable-modern", "on" },
+    { "virtio-scsi-pci", "disable-legacy", "off" },
+    { "virtio-serial-pci", "disable-modern", "on" },
+    { "virtio-serial-pci", "disable-legacy", "off" },
 };
 const size_t hw_compat_2_6_len = G_N_ELEMENTS(hw_compat_2_6);
 

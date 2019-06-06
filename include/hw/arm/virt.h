@@ -34,7 +34,8 @@
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
 #include "hw/boards.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
+#include "hw/block/flash.h"
 #include "sysemu/kvm.h"
 #include "hw/intc/arm_gicv3_common.h"
 
@@ -113,6 +114,7 @@ typedef struct {
     Notifier machine_done;
     DeviceState *platform_bus_dev;
     FWCfgState *fw_cfg;
+    PFlashCFI01 *flash[2];
     bool secure;
     bool highmem;
     bool highmem_ecam;

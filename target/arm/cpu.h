@@ -57,6 +57,9 @@
 #define EXCP_NOCP           17   /* v7M NOCP UsageFault */
 #define EXCP_INVSTATE       18   /* v7M INVSTATE UsageFault */
 #define EXCP_STKOF          19   /* v8M STKOF UsageFault */
+#define EXCP_LAZYFP         20   /* v7M fault during lazy FP stacking */
+#define EXCP_LSERR          21   /* v8M LSERR SecureFault */
+#define EXCP_UNALIGNED      22   /* v7M UNALIGNED UsageFault */
 /* NB: add new EXCP_ defines to the array in arm_log_exception() too */
 
 #define ARMV7M_EXCP_RESET   1
@@ -533,6 +536,11 @@ typedef struct CPUARMState {
         uint32_t scr[M_REG_NUM_BANKS];
         uint32_t msplim[M_REG_NUM_BANKS];
         uint32_t psplim[M_REG_NUM_BANKS];
+        uint32_t fpcar[M_REG_NUM_BANKS];
+        uint32_t fpccr[M_REG_NUM_BANKS];
+        uint32_t fpdscr[M_REG_NUM_BANKS];
+        uint32_t cpacr[M_REG_NUM_BANKS];
+        uint32_t nsacr;
     } v7m;
 
     /* Information associated with an exception about to be taken:
@@ -628,11 +636,13 @@ typedef struct CPUARMState {
     } iwmmxt;
 
 #ifdef TARGET_AARCH64
-    ARMPACKey apia_key;
-    ARMPACKey apib_key;
-    ARMPACKey apda_key;
-    ARMPACKey apdb_key;
-    ARMPACKey apga_key;
+    struct {
+        ARMPACKey apia;
+        ARMPACKey apib;
+        ARMPACKey apda;
+        ARMPACKey apdb;
+        ARMPACKey apga;
+    } keys;
 #endif
 
 #if defined(CONFIG_USER_ONLY)
@@ -935,8 +945,7 @@ void arm_cpu_do_interrupt(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
 bool arm_cpu_exec_interrupt(CPUState *cpu, int int_req);
 
-void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                        int flags);
+void arm_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
 hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
                                          MemTxAttrs *attrs);
@@ -991,17 +1000,6 @@ static inline bool is_a64(CPUARMState *env)
    is returned if the signal was handled by the virtual CPU.  */
 int cpu_arm_signal_handler(int host_signum, void *pinfo,
                            void *puc);
-
-/**
- * pmccntr_op_start/finish
- * @env: CPUARMState
- *
- * Convert the counter in the PMCCNTR between its delta form (the typical mode
- * when it's enabled) and the guest-visible value. These two calls must always
- * surround any action which might affect the counter.
- */
-void pmccntr_op_start(CPUARMState *env);
-void pmccntr_op_finish(CPUARMState *env);
 
 /**
  * pmu_op_start/finish
@@ -1289,6 +1287,7 @@ static inline uint32_t xpsr_read(CPUARMState *env)
         | (env->CF << 29) | ((env->VF & 0x80000000) >> 3) | (env->QF << 27)
         | (env->thumb << 24) | ((env->condexec_bits & 3) << 25)
         | ((env->condexec_bits & 0xfc) << 8)
+        | (env->GE << 16)
         | env->v7m.exception;
 }
 
@@ -1303,6 +1302,9 @@ static inline void xpsr_write(CPUARMState *env, uint32_t val, uint32_t mask)
     }
     if (mask & XPSR_Q) {
         env->QF = ((val & XPSR_Q) != 0);
+    }
+    if (mask & XPSR_GE) {
+        env->GE = (val & XPSR_GE) >> 16;
     }
     if (mask & XPSR_T) {
         env->thumb = ((val & XPSR_T) != 0);
@@ -1587,6 +1589,35 @@ FIELD(V7M_CSSELR, LEVEL, 1, 3)
  * the end of the array.
  */
 FIELD(V7M_CSSELR, INDEX, 0, 4)
+
+/* v7M FPCCR bits */
+FIELD(V7M_FPCCR, LSPACT, 0, 1)
+FIELD(V7M_FPCCR, USER, 1, 1)
+FIELD(V7M_FPCCR, S, 2, 1)
+FIELD(V7M_FPCCR, THREAD, 3, 1)
+FIELD(V7M_FPCCR, HFRDY, 4, 1)
+FIELD(V7M_FPCCR, MMRDY, 5, 1)
+FIELD(V7M_FPCCR, BFRDY, 6, 1)
+FIELD(V7M_FPCCR, SFRDY, 7, 1)
+FIELD(V7M_FPCCR, MONRDY, 8, 1)
+FIELD(V7M_FPCCR, SPLIMVIOL, 9, 1)
+FIELD(V7M_FPCCR, UFRDY, 10, 1)
+FIELD(V7M_FPCCR, RES0, 11, 15)
+FIELD(V7M_FPCCR, TS, 26, 1)
+FIELD(V7M_FPCCR, CLRONRETS, 27, 1)
+FIELD(V7M_FPCCR, CLRONRET, 28, 1)
+FIELD(V7M_FPCCR, LSPENS, 29, 1)
+FIELD(V7M_FPCCR, LSPEN, 30, 1)
+FIELD(V7M_FPCCR, ASPEN, 31, 1)
+/* These bits are banked. Others are non-banked and live in the M_REG_S bank */
+#define R_V7M_FPCCR_BANKED_MASK                 \
+    (R_V7M_FPCCR_LSPACT_MASK |                  \
+     R_V7M_FPCCR_USER_MASK |                    \
+     R_V7M_FPCCR_THREAD_MASK |                  \
+     R_V7M_FPCCR_MMRDY_MASK |                   \
+     R_V7M_FPCCR_SPLIMVIOL_MASK |               \
+     R_V7M_FPCCR_UFRDY_MASK |                   \
+     R_V7M_FPCCR_ASPEN_MASK)
 
 /*
  * System register ID fields.
@@ -1947,7 +1978,7 @@ static inline bool access_secure_reg(CPUARMState *env)
                        (arm_is_secure(_env) && !arm_el_is_aa64((_env), 3)), \
                        (_val))
 
-void arm_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void arm_cpu_list(void);
 uint32_t arm_phys_excp_target_el(CPUState *cs, uint32_t excp_idx,
                                  uint32_t cur_el, bool secure);
 
@@ -1987,6 +2018,18 @@ void armv7m_nvic_set_pending(void *opaque, int irq, bool secure);
  */
 void armv7m_nvic_set_pending_derived(void *opaque, int irq, bool secure);
 /**
+ * armv7m_nvic_set_pending_lazyfp: mark this lazy FP exception as pending
+ * @opaque: the NVIC
+ * @irq: the exception number to mark pending
+ * @secure: false for non-banked exceptions or for the nonsecure
+ * version of a banked exception, true for the secure version of a banked
+ * exception.
+ *
+ * Similar to armv7m_nvic_set_pending(), but specifically for exceptions
+ * generated in the course of lazy stacking of FP registers.
+ */
+void armv7m_nvic_set_pending_lazyfp(void *opaque, int irq, bool secure);
+/**
  * armv7m_nvic_get_pending_irq_info: return highest priority pending
  *    exception, and whether it targets Secure state
  * @opaque: the NVIC
@@ -2022,6 +2065,20 @@ void armv7m_nvic_acknowledge_irq(void *opaque);
  * (Ignoring -1, this is the same as the RETTOBASE value before completion.)
  */
 int armv7m_nvic_complete_irq(void *opaque, int irq, bool secure);
+/**
+ * armv7m_nvic_get_ready_status(void *opaque, int irq, bool secure)
+ * @opaque: the NVIC
+ * @irq: the exception number to mark pending
+ * @secure: false for non-banked exceptions or for the nonsecure
+ * version of a banked exception, true for the secure version of a banked
+ * exception.
+ *
+ * Return whether an exception is "ready", i.e. whether the exception is
+ * enabled and is configured at a priority which would allow it to
+ * interrupt the current execution priority. This controls whether the
+ * RDY bit for it in the FPCCR is set.
+ */
+bool armv7m_nvic_get_ready_status(void *opaque, int irq, bool secure);
 /**
  * armv7m_nvic_raw_execution_priority: return the raw execution priority
  * @opaque: the NVIC
@@ -2559,18 +2616,25 @@ bool write_list_to_cpustate(ARMCPU *cpu);
 /**
  * write_cpustate_to_list:
  * @cpu: ARMCPU
+ * @kvm_sync: true if this is for syncing back to KVM
  *
  * For each register listed in the ARMCPU cpreg_indexes list, write
  * its value from the ARMCPUState structure into the cpreg_values list.
  * This is used to copy info from TCG's working data structures into
  * KVM or for outbound migration.
  *
+ * @kvm_sync is true if we are doing this in order to sync the
+ * register state back to KVM. In this case we will only update
+ * values in the list if the previous list->cpustate sync actually
+ * successfully wrote the CPU state. Otherwise we will keep the value
+ * that is in the list.
+ *
  * Returns: true if all register values were read correctly,
  * false if some register was unknown or could not be read.
  * Note that we do not stop early on failure -- we will attempt
  * reading all registers in the list.
  */
-bool write_cpustate_to_list(ARMCPU *cpu);
+bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync);
 
 #define ARM_CPUID_TI915T      0x54029152
 #define ARM_CPUID_TI925T      0x54029252
@@ -2875,6 +2939,13 @@ static inline int arm_mmu_idx_to_el(ARMMMUIdx mmu_idx)
     }
 }
 
+/*
+ * Return the MMU index for a v7M CPU with all relevant information
+ * manually specified.
+ */
+ARMMMUIdx arm_v7m_mmu_idx_all(CPUARMState *env,
+                              bool secstate, bool priv, bool negpri);
+
 /* Return the MMU index for a v7M CPU in the specified security and
  * privilege state.
  */
@@ -3102,18 +3173,27 @@ FIELD(TBFLAG_ANY, BE_DATA, 23, 1)
 FIELD(TBFLAG_A32, THUMB, 0, 1)
 FIELD(TBFLAG_A32, VECLEN, 1, 3)
 FIELD(TBFLAG_A32, VECSTRIDE, 4, 2)
-FIELD(TBFLAG_A32, VFPEN, 7, 1)
-FIELD(TBFLAG_A32, CONDEXEC, 8, 8)
-FIELD(TBFLAG_A32, SCTLR_B, 16, 1)
-/* We store the bottom two bits of the CPAR as TB flags and handle
- * checks on the other bits at runtime
+/*
+ * We store the bottom two bits of the CPAR as TB flags and handle
+ * checks on the other bits at runtime. This shares the same bits as
+ * VECSTRIDE, which is OK as no XScale CPU has VFP.
  */
-FIELD(TBFLAG_A32, XSCALE_CPAR, 17, 2)
-/* Indicates whether cp register reads and writes by guest code should access
+FIELD(TBFLAG_A32, XSCALE_CPAR, 4, 2)
+/*
+ * Indicates whether cp register reads and writes by guest code should access
  * the secure or nonsecure bank of banked registers; note that this is not
  * the same thing as the current security state of the processor!
  */
-FIELD(TBFLAG_A32, NS, 19, 1)
+FIELD(TBFLAG_A32, NS, 6, 1)
+FIELD(TBFLAG_A32, VFPEN, 7, 1)
+FIELD(TBFLAG_A32, CONDEXEC, 8, 8)
+FIELD(TBFLAG_A32, SCTLR_B, 16, 1)
+/* For M profile only, set if FPCCR.LSPACT is set */
+FIELD(TBFLAG_A32, LSPACT, 18, 1)
+/* For M profile only, set if we must create a new FP context */
+FIELD(TBFLAG_A32, NEW_FP_CTXT_NEEDED, 19, 1)
+/* For M profile only, set if FPCCR.S does not match current security state */
+FIELD(TBFLAG_A32, FPCCR_S_WRONG, 20, 1)
 /* For M profile only, Handler (ie not Thread) mode */
 FIELD(TBFLAG_A32, HANDLER, 21, 1)
 /* For M profile only, whether we should generate stack-limit checks */
@@ -3439,6 +3519,11 @@ static inline bool isar_feature_aa64_condm_4(const ARMISARegisters *id)
 static inline bool isar_feature_aa64_condm_5(const ARMISARegisters *id)
 {
     return FIELD_EX64(id->id_aa64isar0, ID_AA64ISAR0, TS) >= 2;
+}
+
+static inline bool isar_feature_aa64_rndr(const ARMISARegisters *id)
+{
+    return FIELD_EX64(id->id_aa64isar0, ID_AA64ISAR0, RNDR) != 0;
 }
 
 static inline bool isar_feature_aa64_jscvt(const ARMISARegisters *id)

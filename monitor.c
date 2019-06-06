@@ -250,8 +250,6 @@ QEMUBH *qmp_dispatcher_bh;
 struct QMPRequest {
     /* Owner of the request */
     Monitor *mon;
-    /* "id" field of the request */
-    QObject *id;
     /*
      * Request object to be handled or Error to be reported
      * (exactly one of them is non-null)
@@ -353,7 +351,6 @@ int monitor_read_password(Monitor *mon, ReadLineFunc *readline_func,
 
 static void qmp_request_free(QMPRequest *req)
 {
-    qobject_unref(req->id);
     qobject_unref(req->req);
     error_free(req->err);
     g_free(req);
@@ -433,15 +430,14 @@ void monitor_flush(Monitor *mon)
 }
 
 /* flush at every end of line */
-static void monitor_puts(Monitor *mon, const char *str)
+static int monitor_puts(Monitor *mon, const char *str)
 {
+    int i;
     char c;
 
     qemu_mutex_lock(&mon->mon_lock);
-    for(;;) {
-        c = *str++;
-        if (c == '\0')
-            break;
+    for (i = 0; str[i]; i++) {
+        c = str[i];
         if (c == '\n') {
             qstring_append_chr(mon->outbuf, '\r');
         }
@@ -451,39 +447,37 @@ static void monitor_puts(Monitor *mon, const char *str)
         }
     }
     qemu_mutex_unlock(&mon->mon_lock);
+
+    return i;
 }
 
-void monitor_vprintf(Monitor *mon, const char *fmt, va_list ap)
+int monitor_vprintf(Monitor *mon, const char *fmt, va_list ap)
 {
     char *buf;
+    int n;
 
     if (!mon)
-        return;
+        return -1;
 
     if (monitor_is_qmp(mon)) {
-        return;
+        return -1;
     }
 
     buf = g_strdup_vprintf(fmt, ap);
-    monitor_puts(mon, buf);
+    n = monitor_puts(mon, buf);
     g_free(buf);
+    return n;
 }
 
-void monitor_printf(Monitor *mon, const char *fmt, ...)
+int monitor_printf(Monitor *mon, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    monitor_vprintf(mon, fmt, ap);
-    va_end(ap);
-}
+    int ret;
 
-int monitor_fprintf(FILE *stream, const char *fmt, ...)
-{
     va_list ap;
     va_start(ap, fmt);
-    monitor_vprintf((Monitor *)stream, fmt, ap);
+    ret = monitor_vprintf(mon, fmt, ap);
     va_end(ap);
-    return 0;
+    return ret;
 }
 
 static void qmp_send_response(Monitor *mon, const QDict *rsp)
@@ -1051,7 +1045,7 @@ static void hmp_trace_file(Monitor *mon, const QDict *qdict)
     const char *arg = qdict_get_try_str(qdict, "arg");
 
     if (!op) {
-        st_print_trace_file_status((FILE *)mon, &monitor_fprintf);
+        st_print_trace_file_status();
     } else if (!strcmp(op, "on")) {
         st_set_trace_file_enabled(true);
     } else if (!strcmp(op, "off")) {
@@ -1291,7 +1285,7 @@ static void hmp_info_registers(Monitor *mon, const QDict *qdict)
     if (all_cpus) {
         CPU_FOREACH(cs) {
             monitor_printf(mon, "\nCPU#%d\n", cs->cpu_index);
-            cpu_dump_state(cs, (FILE *)mon, monitor_fprintf, CPU_DUMP_FPU);
+            cpu_dump_state(cs, NULL, CPU_DUMP_FPU);
         }
     } else {
         cs = mon_get_cpu();
@@ -1301,7 +1295,7 @@ static void hmp_info_registers(Monitor *mon, const QDict *qdict)
             return;
         }
 
-        cpu_dump_state(cs, (FILE *)mon, monitor_fprintf, CPU_DUMP_FPU);
+        cpu_dump_state(cs, NULL, CPU_DUMP_FPU);
     }
 }
 
@@ -1313,13 +1307,13 @@ static void hmp_info_jit(Monitor *mon, const QDict *qdict)
         return;
     }
 
-    dump_exec_info((FILE *)mon, monitor_fprintf);
-    dump_drift_info((FILE *)mon, monitor_fprintf);
+    dump_exec_info();
+    dump_drift_info();
 }
 
 static void hmp_info_opcount(Monitor *mon, const QDict *qdict)
 {
-    dump_opcount_info((FILE *)mon, monitor_fprintf);
+    dump_opcount_info();
 }
 #endif
 
@@ -1331,7 +1325,7 @@ static void hmp_info_sync_profile(Monitor *mon, const QDict *qdict)
     enum QSPSortBy sort_by;
 
     sort_by = mean ? QSP_SORT_BY_AVG_WAIT_TIME : QSP_SORT_BY_TOTAL_WAIT_TIME;
-    qsp_report((FILE *)mon, monitor_fprintf, max, sort_by, coalesce);
+    qsp_report(max, sort_by, coalesce);
 }
 
 static void hmp_info_history(Monitor *mon, const QDict *qdict)
@@ -1359,7 +1353,7 @@ static void hmp_info_cpustats(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "No CPU available\n");
         return;
     }
-    cpu_dump_statistics(cs, (FILE *)mon, &monitor_fprintf, 0);
+    cpu_dump_statistics(cs, 0);
 }
 
 static void hmp_info_trace_events(Monitor *mon, const QDict *qdict)
@@ -1679,6 +1673,27 @@ static void hmp_gpa2hva(Monitor *mon, const QDict *qdict)
     memory_region_unref(mr);
 }
 
+static void hmp_gva2gpa(Monitor *mon, const QDict *qdict)
+{
+    target_ulong addr = qdict_get_int(qdict, "addr");
+    MemTxAttrs attrs;
+    CPUState *cs = mon_get_cpu();
+    hwaddr gpa;
+
+    if (!cs) {
+        monitor_printf(mon, "No cpu\n");
+        return;
+    }
+
+    gpa  = cpu_get_phys_page_attrs_debug(cs, addr & TARGET_PAGE_MASK, &attrs);
+    if (gpa == -1) {
+        monitor_printf(mon, "Unmapped\n");
+    } else {
+        monitor_printf(mon, "gpa: %#" HWADDR_PRIx "\n",
+                       gpa + (addr & ~TARGET_PAGE_MASK));
+    }
+}
+
 #ifdef CONFIG_LINUX
 static uint64_t vtop(void *ptr, Error **errp)
 {
@@ -1902,8 +1917,7 @@ static void hmp_info_mtree(Monitor *mon, const QDict *qdict)
     bool dispatch_tree = qdict_get_try_bool(qdict, "dispatch_tree", false);
     bool owner = qdict_get_try_bool(qdict, "owner", false);
 
-    mtree_info((fprintf_function)monitor_printf, mon, flatview, dispatch_tree,
-               owner);
+    mtree_info(flatview, dispatch_tree, owner);
 }
 
 static void hmp_info_numa(Monitor *mon, const QDict *qdict)
@@ -4108,18 +4122,14 @@ static int monitor_can_read(void *opaque)
  * Null @rsp can only happen for commands with QCO_NO_SUCCESS_RESP.
  * Nothing is emitted then.
  */
-static void monitor_qmp_respond(Monitor *mon, QDict *rsp, QObject *id)
+static void monitor_qmp_respond(Monitor *mon, QDict *rsp)
 {
     if (rsp) {
-        if (id) {
-            qdict_put_obj(rsp, "id", qobject_ref(id));
-        }
-
         qmp_send_response(mon, rsp);
     }
 }
 
-static void monitor_qmp_dispatch(Monitor *mon, QObject *req, QObject *id)
+static void monitor_qmp_dispatch(Monitor *mon, QObject *req)
 {
     Monitor *old_mon;
     QDict *rsp;
@@ -4144,7 +4154,7 @@ static void monitor_qmp_dispatch(Monitor *mon, QObject *req, QObject *id)
         }
     }
 
-    monitor_qmp_respond(mon, rsp, id);
+    monitor_qmp_respond(mon, rsp);
     qobject_unref(rsp);
 }
 
@@ -4208,13 +4218,15 @@ static void monitor_qmp_bh_dispatcher(void *data)
         mon->qmp.qmp_requests->length == QMP_REQ_QUEUE_LEN_MAX - 1;
     qemu_mutex_unlock(&mon->qmp.qmp_queue_lock);
     if (req_obj->req) {
-        trace_monitor_qmp_cmd_in_band(qobject_get_try_str(req_obj->id) ?: "");
-        monitor_qmp_dispatch(mon, req_obj->req, req_obj->id);
+        QDict *qdict = qobject_to(QDict, req_obj->req);
+        QObject *id = qdict ? qdict_get(qdict, "id") : NULL;
+        trace_monitor_qmp_cmd_in_band(qobject_get_try_str(id) ?: "");
+        monitor_qmp_dispatch(mon, req_obj->req);
     } else {
         assert(req_obj->err);
         rsp = qmp_error_response(req_obj->err);
         req_obj->err = NULL;
-        monitor_qmp_respond(mon, rsp, NULL);
+        monitor_qmp_respond(mon, rsp);
         qobject_unref(rsp);
     }
 
@@ -4239,8 +4251,7 @@ static void handle_qmp_command(void *opaque, QObject *req, Error *err)
 
     qdict = qobject_to(QDict, req);
     if (qdict) {
-        id = qobject_ref(qdict_get(qdict, "id"));
-        qdict_del(qdict, "id");
+        id = qdict_get(qdict, "id");
     } /* else will fail qmp_dispatch() */
 
     if (req && trace_event_get_state_backends(TRACE_HANDLE_QMP_COMMAND)) {
@@ -4251,17 +4262,14 @@ static void handle_qmp_command(void *opaque, QObject *req, Error *err)
 
     if (qdict && qmp_is_oob(qdict)) {
         /* OOB commands are executed immediately */
-        trace_monitor_qmp_cmd_out_of_band(qobject_get_try_str(id)
-                                          ?: "");
-        monitor_qmp_dispatch(mon, req, id);
+        trace_monitor_qmp_cmd_out_of_band(qobject_get_try_str(id) ?: "");
+        monitor_qmp_dispatch(mon, req);
         qobject_unref(req);
-        qobject_unref(id);
         return;
     }
 
     req_obj = g_new0(QMPRequest, 1);
     req_obj->mon = mon;
-    req_obj->id = id;
     req_obj->req = req;
     req_obj->err = err;
 
@@ -4281,7 +4289,7 @@ static void handle_qmp_command(void *opaque, QObject *req, Error *err)
 
     /*
      * Put the request to the end of queue so that requests will be
-     * handled in time order.  Ownership for req_obj, req, id,
+     * handled in time order.  Ownership for req_obj, req,
      * etc. will be delivered to the handler side.
      */
     assert(mon->qmp.qmp_requests->length < QMP_REQ_QUEUE_LEN_MAX);
@@ -4543,36 +4551,25 @@ static void monitor_readline_flush(void *opaque)
 }
 
 /*
- * Print to current monitor if we have one, else to stream.
- * TODO should return int, so callers can calculate width, but that
- * requires surgery to monitor_vprintf().  Left for another day.
- */
-void monitor_vfprintf(FILE *stream, const char *fmt, va_list ap)
-{
-    if (cur_mon && !monitor_cur_is_qmp()) {
-        monitor_vprintf(cur_mon, fmt, ap);
-    } else {
-        vfprintf(stream, fmt, ap);
-    }
-}
-
-/*
  * Print to current monitor if we have one, else to stderr.
- * TODO should return int, so callers can calculate width, but that
- * requires surgery to monitor_vprintf().  Left for another day.
  */
-void error_vprintf(const char *fmt, va_list ap)
-{
-    monitor_vfprintf(stderr, fmt, ap);
-}
-
-void error_vprintf_unless_qmp(const char *fmt, va_list ap)
+int error_vprintf(const char *fmt, va_list ap)
 {
     if (cur_mon && !monitor_cur_is_qmp()) {
-        monitor_vprintf(cur_mon, fmt, ap);
-    } else if (!cur_mon) {
-        vfprintf(stderr, fmt, ap);
+        return monitor_vprintf(cur_mon, fmt, ap);
     }
+    return vfprintf(stderr, fmt, ap);
+}
+
+int error_vprintf_unless_qmp(const char *fmt, va_list ap)
+{
+    if (!cur_mon) {
+        return vfprintf(stderr, fmt, ap);
+    }
+    if (!monitor_cur_is_qmp()) {
+        return monitor_vprintf(cur_mon, fmt, ap);
+    }
+    return -1;
 }
 
 static void monitor_list_append(Monitor *mon)

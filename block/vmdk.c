@@ -195,13 +195,15 @@ static int vmdk_probe(const uint8_t *buf, int buf_size, const char *filename)
             }
             if (end - p >= strlen("version=X\n")) {
                 if (strncmp("version=1\n", p, strlen("version=1\n")) == 0 ||
-                    strncmp("version=2\n", p, strlen("version=2\n")) == 0) {
+                    strncmp("version=2\n", p, strlen("version=2\n")) == 0 ||
+                    strncmp("version=3\n", p, strlen("version=3\n")) == 0) {
                     return 100;
                 }
             }
             if (end - p >= strlen("version=X\r\n")) {
                 if (strncmp("version=1\r\n", p, strlen("version=1\r\n")) == 0 ||
-                    strncmp("version=2\r\n", p, strlen("version=2\r\n")) == 0) {
+                    strncmp("version=2\r\n", p, strlen("version=2\r\n")) == 0 ||
+                    strncmp("version=3\r\n", p, strlen("version=3\r\n")) == 0) {
                     return 100;
                 }
             }
@@ -395,6 +397,8 @@ static int vmdk_parent_open(BlockDriverState *bs)
         pstrcpy(bs->auto_backing_file, end_name - p_name + 1, p_name);
         pstrcpy(bs->backing_file, sizeof(bs->backing_file),
                 bs->auto_backing_file);
+        pstrcpy(bs->backing_format, sizeof(bs->backing_format),
+                "vmdk");
     }
 
 out:
@@ -2352,7 +2356,8 @@ static BlockBackend *vmdk_co_create_cb(int64_t size, int idx,
     if (!bs) {
         return NULL;
     }
-    blk = blk_new(BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE | BLK_PERM_RESIZE,
+    blk = blk_new(bdrv_get_aio_context(bs),
+                  BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE | BLK_PERM_RESIZE,
                   BLK_PERM_ALL);
     if (blk_insert_bs(blk, bs, errp)) {
         bdrv_unref(bs);

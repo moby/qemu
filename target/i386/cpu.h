@@ -387,6 +387,7 @@ typedef enum X86Seg {
 #define MSR_IA32_MISC_ENABLE            0x1a0
 /* Indicates good rep/movs microcode on some processors: */
 #define MSR_IA32_MISC_ENABLE_DEFAULT    1
+#define MSR_IA32_MISC_ENABLE_MWAIT      (1ULL << 18)
 
 #define MSR_MTRRphysBase(reg)           (0x200 + 2 * (reg))
 #define MSR_MTRRphysMask(reg)           (0x200 + 2 * (reg) + 1)
@@ -725,6 +726,8 @@ typedef uint32_t FeatureWordArray[FEATURE_WORDS];
 #define CPUID_VENDOR_AMD   "AuthenticAMD"
 
 #define CPUID_VENDOR_VIA   "CentaurHauls"
+
+#define CPUID_VENDOR_HYGON    "HygonGenuine"
 
 #define CPUID_MWAIT_IBE     (1U << 1) /* Interrupts can exit capability */
 #define CPUID_MWAIT_EMX     (1U << 0) /* enumeration supported */
@@ -1521,8 +1524,7 @@ int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 void x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
 
-void x86_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                        int flags);
+void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
 hwaddr x86_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 
@@ -1532,7 +1534,7 @@ int x86_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void x86_cpu_exec_enter(CPUState *cpu);
 void x86_cpu_exec_exit(CPUState *cpu);
 
-void x86_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void x86_cpu_list(void);
 int cpu_x86_support_mca_broadcast(CPUX86State *env);
 
 int cpu_get_pic_interrupt(CPUX86State *s);
@@ -1655,8 +1657,9 @@ void host_cpuid(uint32_t function, uint32_t count,
 void host_vendor_fms(char *vendor, int *family, int *model, int *stepping);
 
 /* helper.c */
-int x86_cpu_handle_mmu_fault(CPUState *cpu, vaddr addr, int size,
-                             int is_write, int mmu_idx);
+bool x86_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                      MMUAccessType access_type, int mmu_idx,
+                      bool probe, uintptr_t retaddr);
 void x86_cpu_set_a20(X86CPU *cpu, int a20_state);
 
 #ifndef CONFIG_USER_ONLY
@@ -1924,8 +1927,7 @@ void enable_compat_apic_id_mode(void);
 #define APIC_DEFAULT_ADDRESS 0xfee00000
 #define APIC_SPACE_SIZE      0x100000
 
-void x86_cpu_dump_local_apic_state(CPUState *cs, FILE *f,
-                                   fprintf_function cpu_fprintf, int flags);
+void x86_cpu_dump_local_apic_state(CPUState *cs, int flags);
 
 /* cpu.c */
 bool cpu_is_bsp(X86CPU *cpu);

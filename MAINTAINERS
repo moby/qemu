@@ -470,6 +470,7 @@ M: Richard Henderson <rth@twiddle.net>
 S: Maintained
 F: hw/alpha/
 F: hw/isa/smc37c669-superio.c
+F: tests/tcg/alpha/system/
 
 ARM Machines
 ------------
@@ -663,10 +664,14 @@ M: Peter Maydell <peter.maydell@linaro.org>
 L: qemu-arm@nongnu.org
 S: Odd Fixes
 F: hw/arm/nseries.c
+F: hw/display/blizzard.c
 F: hw/input/lm832x.c
 F: hw/input/tsc2005.c
 F: hw/misc/cbus.c
 F: hw/timer/twl92230.c
+F: include/hw/display/blizzard.h
+F: include/hw/input/tsc2xxx.h
+F: include/hw/misc/cbus.h
 
 Palm
 M: Andrzej Zaborowski <balrogg@gmail.com>
@@ -675,6 +680,7 @@ L: qemu-arm@nongnu.org
 S: Odd Fixes
 F: hw/arm/palm.c
 F: hw/input/tsc210x.c
+F: include/hw/input/tsc2xxx.h
 
 Raspberry Pi
 M: Peter Maydell <peter.maydell@linaro.org>
@@ -714,6 +720,7 @@ F: hw/misc/mst_fpga.c
 F: hw/misc/max111x.c
 F: include/hw/arm/pxa.h
 F: include/hw/arm/sharpsl.h
+F: include/hw/display/tc6393xb.h
 
 SABRELITE / i.MX6
 M: Peter Maydell <peter.maydell@linaro.org>
@@ -740,6 +747,7 @@ M: Peter Maydell <peter.maydell@linaro.org>
 L: qemu-arm@nongnu.org
 S: Maintained
 F: hw/*/stellaris*
+F: include/hw/input/gamepad.h
 
 Versatile Express
 M: Peter Maydell <peter.maydell@linaro.org>
@@ -927,6 +935,7 @@ M: Aurelien Jarno <aurelien@aurel32.net>
 R: Aleksandar Rikalo <arikalo@wavecomp.com>
 S: Maintained
 F: hw/mips/mips_malta.c
+F: tests/acceptance/linux_ssh_mips_malta.py
 
 Mipssim
 M: Aleksandar Markovic <amarkovic@wavecomp.com>
@@ -1061,13 +1070,24 @@ F: include/hw/*/xics*
 F: pc-bios/spapr-rtas/*
 F: pc-bios/spapr-rtas.bin
 F: pc-bios/slof.bin
-F: pc-bios/skiboot.lid
 F: docs/specs/ppc-spapr-hcalls.txt
 F: docs/specs/ppc-spapr-hotplug.txt
 F: tests/spapr*
 F: tests/libqos/*spapr*
 F: tests/rtas*
 F: tests/libqos/rtas*
+
+PowerNV (Non-Virtualized)
+M: Cédric Le Goater <clg@kaod.org>
+M: David Gibson <david@gibson.dropbear.id.au>
+L: qemu-ppc@nongnu.org
+S: Maintained
+F: hw/ppc/pnv*
+F: hw/intc/pnv*
+F: hw/intc/xics_pnv.c
+F: include/hw/ppc/pnv*
+F: pc-bios/skiboot.lid
+F: tests/pnv*
 
 virtex_ml507
 M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
@@ -1140,10 +1160,11 @@ F: include/hw/timer/sun4v-rtc.h
 
 Leon3
 M: Fabien Chouteau <chouteau@adacore.com>
+M: KONRAD Frederic <frederic.konrad@adacore.com>
 S: Maintained
 F: hw/sparc/leon3.c
 F: hw/*/grlib*
-F: include/hw/sparc/grlib.h
+F: include/hw/*/grlib*
 
 S390 Machines
 -------------
@@ -1170,6 +1191,7 @@ S: Supported
 F: hw/s390x/ipl.*
 F: pc-bios/s390-ccw/
 F: pc-bios/s390-ccw.img
+F: docs/devel/s390-dasd-ipl.txt
 T: git https://github.com/borntraeger/qemu.git s390-next
 L: qemu-s390x@nongnu.org
 
@@ -1372,6 +1394,13 @@ F: include/hw/net/
 F: tests/virtio-net-test.c
 T: git https://github.com/jasowang/qemu.git net
 
+Parallel NOR Flash devices
+M: Philippe Mathieu-Daudé <philmd@redhat.com>
+T: git https://gitlab.com/philmd/qemu.git pflash-next
+S: Maintained
+F: hw/block/pflash_cfi*.c
+F: include/hw/block/flash.h
+
 SCSI
 M: Paolo Bonzini <pbonzini@redhat.com>
 R: Fam Zheng <fam@euphon.net>
@@ -1434,6 +1463,7 @@ S: Supported
 F: hw/vfio/ccw.c
 F: hw/s390x/s390-ccw.c
 F: include/hw/s390x/s390-ccw.h
+F: include/hw/s390x/vfio-ccw.h
 T: git https://github.com/cohuck/qemu.git s390-next
 L: qemu-s390x@nongnu.org
 
@@ -1456,8 +1486,10 @@ M: Michael S. Tsirkin <mst@redhat.com>
 S: Supported
 F: hw/*/*vhost*
 F: docs/interop/vhost-user.json
-F: docs/interop/vhost-user.txt
+F: docs/interop/vhost-user.rst
 F: contrib/vhost-user-*/
+F: backends/vhost-user.c
+F: include/sysemu/vhost-user-backend.h
 
 virtio
 M: Michael S. Tsirkin <mst@redhat.com>
@@ -1499,8 +1531,10 @@ L: qemu-s390x@nongnu.org
 virtio-input
 M: Gerd Hoffmann <kraxel@redhat.com>
 S: Maintained
+F: hw/input/vhost-user-input.c
 F: hw/input/virtio-input*.c
 F: include/hw/virtio/virtio-input.h
+F: contrib/vhost-user-input/*
 
 virtio-serial
 M: Amit Shah <amit@kernel.org>
@@ -1641,8 +1675,16 @@ virtio-gpu
 M: Gerd Hoffmann <kraxel@redhat.com>
 S: Maintained
 F: hw/display/virtio-gpu*
-F: hw/display/virtio-vga.c
+F: hw/display/virtio-vga.*
 F: include/hw/virtio/virtio-gpu.h
+
+vhost-user-gpu
+M: Marc-André Lureau <marcandre.lureau@redhat.com>
+M: Gerd Hoffmann <kraxel@redhat.com>
+S: Maintained
+F: docs/interop/vhost-user-gpu.rst
+F: contrib/vhost-user-gpu
+F: hw/display/vhost-user-*
 
 Cirrus VGA
 M: Gerd Hoffmann <kraxel@redhat.com>
@@ -1664,6 +1706,7 @@ R: Gerd Hoffmann <kraxel@redhat.com>
 S: Supported
 F: docs/specs/fw_cfg.txt
 F: hw/nvram/fw_cfg.c
+F: stubs/fw_cfg.c
 F: include/hw/nvram/fw_cfg.h
 F: include/standard-headers/linux/qemu_fw_cfg.h
 F: tests/libqos/fw_cfg.c
@@ -1677,6 +1720,7 @@ L: qemu-ppc@nongnu.org
 S: Supported
 F: hw/*/*xive*
 F: include/hw/*/*xive*
+F: docs/*/*xive*
 
 Subsystems
 ----------
@@ -1802,7 +1846,8 @@ F: qom/cpu.c
 F: include/qom/cpu.h
 
 Device Tree
-M: Alexander Graf <agraf@suse.de>
+M: Alistair Francis <alistair.francis@wdc.com>
+R: David Gibson <david@gibson.dropbear.id.au>
 S: Maintained
 F: device_tree.c
 F: include/sysemu/device_tree.h
@@ -1883,6 +1928,8 @@ F: hmp.[ch]
 F: hmp-commands*.hx
 F: include/monitor/hmp-target.h
 F: tests/test-hmp.c
+F: include/qemu/qemu-print.h
+F: util/qemu-print.c
 
 Network device backends
 M: Jason Wang <jasowang@redhat.com>
@@ -2012,6 +2059,7 @@ M: Laurent Vivier <lvivier@redhat.com>
 R: Paolo Bonzini <pbonzini@redhat.com>
 S: Maintained
 F: qtest.c
+F: accel/qtest.c
 F: tests/libqtest.*
 F: tests/libqos/
 F: tests/*-test.c
@@ -2167,7 +2215,7 @@ F: include/migration/failover.h
 F: docs/COLO-FT.txt
 
 COLO Proxy
-M: Zhang Chen <zhangckid@gmail.com>
+M: Zhang Chen <chen.zhang@intel.com>
 M: Li Zhijian <lizhijian@cn.fujitsu.com>
 S: Supported
 F: docs/colo-proxy.txt
@@ -2209,6 +2257,18 @@ F: include/hw/i2c/i2c.h
 F: include/hw/i2c/smbus_master.h
 F: include/hw/i2c/smbus_slave.h
 F: include/hw/i2c/smbus_eeprom.h
+
+EDK2 Firmware
+M: Laszlo Ersek <lersek@redhat.com>
+M: Philippe Mathieu-Daudé <philmd@redhat.com>
+S: Supported
+F: pc-bios/descriptors/??-edk2-*.json
+F: pc-bios/edk2-*
+F: roms/Makefile.edk2
+F: roms/edk2
+F: roms/edk2-*
+F: tests/data/uefi-boot-images/
+F: tests/uefi-test-tools/
 
 Usermode Emulation
 ------------------
@@ -2368,12 +2428,13 @@ F: block/ssh.c
 
 CURL
 L: qemu-block@nongnu.org
-S: Supported
+S: Odd Fixes
 F: block/curl.c
 
 GLUSTER
 L: qemu-block@nongnu.org
-S: Supported
+L: integration@gluster.org
+S: Odd Fixes
 F: block/gluster.c
 
 Null Block Driver
@@ -2511,6 +2572,13 @@ F: hw/rdma/vmw/*
 F: docs/pvrdma.txt
 F: contrib/rdmacm-mux/*
 F: qapi/rdma.json
+
+Semihosting
+M: Alex Bennée <alex.bennee@linaro.org>
+L: qemu-devel@nongnu.org
+S: Maintained
+F: hw/semihosting/
+F: include/hw/semihosting/
 
 Build and test automation
 -------------------------

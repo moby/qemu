@@ -51,6 +51,7 @@
 #include "qemu/error-report.h"
 #include "exec/ramlist.h"
 #include "hw/intc/intc.h"
+#include "hw/rdma/rdma.h"
 #include "migration/snapshot.h"
 #include "migration/misc.h"
 
@@ -432,17 +433,17 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
             MigrationParameter_str(MIGRATION_PARAMETER_BLOCK_INCREMENTAL),
             params->block_incremental ? "on" : "off");
         monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_X_MULTIFD_CHANNELS),
-            params->x_multifd_channels);
-        monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_X_MULTIFD_PAGE_COUNT),
-            params->x_multifd_page_count);
+            MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_CHANNELS),
+            params->multifd_channels);
         monitor_printf(mon, "%s: %" PRIu64 "\n",
             MigrationParameter_str(MIGRATION_PARAMETER_XBZRLE_CACHE_SIZE),
             params->xbzrle_cache_size);
         monitor_printf(mon, "%s: %" PRIu64 "\n",
             MigrationParameter_str(MIGRATION_PARAMETER_MAX_POSTCOPY_BANDWIDTH),
             params->max_postcopy_bandwidth);
+        monitor_printf(mon, " %s: '%s'\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_TLS_AUTHZ),
+            params->has_tls_authz ? params->tls_authz : "");
     }
 
     qapi_free_MigrationParameters(params);
@@ -579,8 +580,7 @@ static void print_block_info(Monitor *mon, BlockInfo *info,
         monitor_printf(mon, "\nImages:\n");
         image_info = inserted->image;
         while (1) {
-                bdrv_image_info_dump((fprintf_function)monitor_printf,
-                                     mon, image_info);
+                bdrv_image_info_dump(image_info);
             if (image_info->has_backing_image) {
                 image_info = image_info->backing_image;
             } else {
@@ -1011,6 +1011,32 @@ void hmp_info_pic(Monitor *mon, const QDict *qdict)
 {
     object_child_foreach_recursive(object_get_root(),
                                    hmp_info_pic_foreach, mon);
+}
+
+static int hmp_info_rdma_foreach(Object *obj, void *opaque)
+{
+    RdmaProvider *rdma;
+    RdmaProviderClass *k;
+    Monitor *mon = opaque;
+
+    if (object_dynamic_cast(obj, INTERFACE_RDMA_PROVIDER)) {
+        rdma = RDMA_PROVIDER(obj);
+        k = RDMA_PROVIDER_GET_CLASS(obj);
+        if (k->print_statistics) {
+            k->print_statistics(mon, rdma);
+        } else {
+            monitor_printf(mon, "RDMA statistics not available for %s.\n",
+                           object_get_typename(obj));
+        }
+    }
+
+    return 0;
+}
+
+void hmp_info_rdma(Monitor *mon, const QDict *qdict)
+{
+    object_child_foreach_recursive(object_get_root(),
+                                   hmp_info_rdma_foreach, mon);
 }
 
 void hmp_info_pci(Monitor *mon, const QDict *qdict)
@@ -1454,10 +1480,11 @@ void hmp_delvm(Monitor *mon, const QDict *qdict)
     const char *name = qdict_get_str(qdict, "name");
 
     if (bdrv_all_delete_snapshot(name, &bs, &err) < 0) {
-        error_reportf_err(err,
-                          "Error while deleting snapshot on device '%s': ",
-                          bdrv_get_device_name(bs));
+        error_prepend(&err,
+                      "deleting snapshot on device '%s': ",
+                      bdrv_get_device_name(bs));
     }
+    hmp_handle_error(mon, &err);
 }
 
 void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
@@ -1559,7 +1586,7 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "List of snapshots present on all disks:\n");
 
     if (total > 0) {
-        bdrv_snapshot_dump((fprintf_function)monitor_printf, mon, NULL);
+        bdrv_snapshot_dump(NULL);
         monitor_printf(mon, "\n");
         for (i = 0; i < total; i++) {
             sn = &sn_tab[global_snapshots[i]];
@@ -1567,7 +1594,7 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
              * overwrite it.
              */
             pstrcpy(sn->id_str, sizeof(sn->id_str), "--");
-            bdrv_snapshot_dump((fprintf_function)monitor_printf, mon, sn);
+            bdrv_snapshot_dump(sn);
             monitor_printf(mon, "\n");
         }
     } else {
@@ -1581,11 +1608,10 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
         monitor_printf(mon,
                        "\nList of partial (non-loadable) snapshots on '%s':\n",
                        image_entry->imagename);
-        bdrv_snapshot_dump((fprintf_function)monitor_printf, mon, NULL);
+        bdrv_snapshot_dump(NULL);
         monitor_printf(mon, "\n");
         QTAILQ_FOREACH(snapshot_entry, &image_entry->snapshots, next) {
-            bdrv_snapshot_dump((fprintf_function)monitor_printf, mon,
-                               &snapshot_entry->sn);
+            bdrv_snapshot_dump(&snapshot_entry->sn);
             monitor_printf(mon, "\n");
         }
     }
@@ -1759,6 +1785,12 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->tls_hostname->type = QTYPE_QSTRING;
         visit_type_str(v, param, &p->tls_hostname->u.s, &err);
         break;
+    case MIGRATION_PARAMETER_TLS_AUTHZ:
+        p->has_tls_authz = true;
+        p->tls_authz = g_new0(StrOrNull, 1);
+        p->tls_authz->type = QTYPE_QSTRING;
+        visit_type_str(v, param, &p->tls_authz->u.s, &err);
+        break;
     case MIGRATION_PARAMETER_MAX_BANDWIDTH:
         p->has_max_bandwidth = true;
         /*
@@ -1785,19 +1817,17 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_block_incremental = true;
         visit_type_bool(v, param, &p->block_incremental, &err);
         break;
-    case MIGRATION_PARAMETER_X_MULTIFD_CHANNELS:
-        p->has_x_multifd_channels = true;
-        visit_type_int(v, param, &p->x_multifd_channels, &err);
-        break;
-    case MIGRATION_PARAMETER_X_MULTIFD_PAGE_COUNT:
-        p->has_x_multifd_page_count = true;
-        visit_type_int(v, param, &p->x_multifd_page_count, &err);
+    case MIGRATION_PARAMETER_MULTIFD_CHANNELS:
+        p->has_multifd_channels = true;
+        visit_type_int(v, param, &p->multifd_channels, &err);
         break;
     case MIGRATION_PARAMETER_XBZRLE_CACHE_SIZE:
         p->has_xbzrle_cache_size = true;
         visit_type_size(v, param, &cache_size, &err);
-        if (err || cache_size > INT64_MAX
-            || (size_t)cache_size != cache_size) {
+        if (err) {
+            break;
+        }
+        if (cache_size > INT64_MAX || (size_t)cache_size != cache_size) {
             error_setg(&err, "Invalid size %s", valuestr);
             break;
         }
@@ -2530,7 +2560,8 @@ void hmp_qemu_io(Monitor *mon, const QDict *qdict)
     if (!blk) {
         BlockDriverState *bs = bdrv_lookup_bs(NULL, device, &err);
         if (bs) {
-            blk = local_blk = blk_new(0, BLK_PERM_ALL);
+            blk = local_blk = blk_new(bdrv_get_aio_context(bs),
+                                      0, BLK_PERM_ALL);
             ret = blk_insert_bs(blk, bs, &err);
             if (ret < 0) {
                 goto fail;

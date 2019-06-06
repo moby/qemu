@@ -652,7 +652,7 @@ static int raw_open_common(BlockDriverState *bs, QDict *options,
     }
 #endif
 
-    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP | BDRV_REQ_NO_FALLBACK;
     ret = 0;
 fail:
     if (filename && (bdrv_flags & BDRV_O_TEMPORARY)) {
@@ -815,6 +815,18 @@ static int raw_handle_perm_lock(BlockDriverState *bs,
 
     switch (op) {
     case RAW_PL_PREPARE:
+        if ((s->perm | new_perm) == s->perm &&
+            (s->shared_perm & new_shared) == s->shared_perm)
+        {
+            /*
+             * We are going to unlock bytes, it should not fail. If it fail due
+             * to some fs-dependent permission-unrelated reasons (which occurs
+             * sometimes on NFS and leads to abort in bdrv_replace_child) we
+             * can't prevent such errors by any check here. And we ignore them
+             * anyway in ABORT and COMMIT.
+             */
+            return 0;
+        }
         ret = raw_apply_lock_bytes(s, s->fd, s->perm | new_perm,
                                    ~s->shared_perm | ~new_shared,
                                    false, errp);
@@ -1432,8 +1444,21 @@ out:
 #ifdef CONFIG_XFS
 static int xfs_write_zeroes(BDRVRawState *s, int64_t offset, uint64_t bytes)
 {
+    int64_t len;
     struct xfs_flock64 fl;
     int err;
+
+    len = lseek(s->fd, 0, SEEK_END);
+    if (len < 0) {
+        return -errno;
+    }
+
+    if (offset + bytes > len) {
+        /* XFS_IOC_ZERO_RANGE does not increase the file length */
+        if (ftruncate(s->fd, offset + bytes) < 0) {
+            return -errno;
+        }
+    }
 
     memset(&fl, 0, sizeof(fl));
     fl.l_whence = SEEK_SET;
@@ -1500,14 +1525,19 @@ static ssize_t handle_aiocb_write_zeroes_block(RawPosixAIOData *aiocb)
     }
 
 #ifdef BLKZEROOUT
-    do {
-        uint64_t range[2] = { aiocb->aio_offset, aiocb->aio_nbytes };
-        if (ioctl(aiocb->aio_fildes, BLKZEROOUT, range) == 0) {
-            return 0;
-        }
-    } while (errno == EINTR);
+    /* The BLKZEROOUT implementation in the kernel doesn't set
+     * BLKDEV_ZERO_NOFALLBACK, so we can't call this if we have to avoid slow
+     * fallbacks. */
+    if (!(aiocb->aio_type & QEMU_AIO_NO_FALLBACK)) {
+        do {
+            uint64_t range[2] = { aiocb->aio_offset, aiocb->aio_nbytes };
+            if (ioctl(aiocb->aio_fildes, BLKZEROOUT, range) == 0) {
+                return 0;
+            }
+        } while (errno == EINTR);
 
-    ret = translate_err(-errno);
+        ret = translate_err(-errno);
+    }
 #endif
 
     if (ret == -ENOTSUP) {
@@ -2458,6 +2488,8 @@ static int coroutine_fn raw_co_block_status(BlockDriverState *bs,
     off_t data = 0, hole = 0;
     int ret;
 
+    assert(QEMU_IS_ALIGNED(offset | bytes, bs->bl.request_alignment));
+
     ret = fd_open(bs);
     if (ret < 0) {
         return ret;
@@ -2483,6 +2515,20 @@ static int coroutine_fn raw_co_block_status(BlockDriverState *bs,
         /* On a data extent, compute bytes to the end of the extent,
          * possibly including a partial sector at EOF. */
         *pnum = MIN(bytes, hole - offset);
+
+        /*
+         * We are not allowed to return partial sectors, though, so
+         * round up if necessary.
+         */
+        if (!QEMU_IS_ALIGNED(*pnum, bs->bl.request_alignment)) {
+            int64_t file_length = raw_getlength(bs);
+            if (file_length > 0) {
+                /* Ignore errors, this is just a safeguard */
+                assert(hole == file_length);
+            }
+            *pnum = ROUND_UP(*pnum, bs->bl.request_alignment);
+        }
+
         ret = BDRV_BLOCK_DATA;
     } else {
         /* On a hole, compute bytes to the beginning of the next extent.  */
@@ -2658,6 +2704,9 @@ raw_do_pwrite_zeroes(BlockDriverState *bs, int64_t offset, int bytes,
 
     if (blkdev) {
         acb.aio_type |= QEMU_AIO_BLKDEV;
+    }
+    if (flags & BDRV_REQ_NO_FALLBACK) {
+        acb.aio_type |= QEMU_AIO_NO_FALLBACK;
     }
 
     if (flags & BDRV_REQ_MAY_UNMAP) {

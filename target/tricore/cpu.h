@@ -224,8 +224,7 @@ static inline TriCoreCPU *tricore_env_get_cpu(CPUTriCoreState *env)
 #define ENV_OFFSET offsetof(TriCoreCPU, env)
 
 hwaddr tricore_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
-void tricore_cpu_dump_state(CPUState *cpu, FILE *f,
-                            fprintf_function cpu_fprintf, int flags);
+void tricore_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 
 
 #define MASK_PCXI_PCPN 0xff000000
@@ -375,7 +374,7 @@ void fpu_set_state(CPUTriCoreState *env);
 
 #define MMU_USER_IDX 2
 
-void tricore_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void tricore_cpu_list(void);
 
 #define cpu_signal_handler cpu_tricore_signal_handler
 #define cpu_list tricore_cpu_list
@@ -418,8 +417,8 @@ static inline void cpu_get_tb_cpu_state(CPUTriCoreState *env, target_ulong *pc,
 #define CPU_RESOLVING_TYPE TYPE_TRICORE_CPU
 
 /* helpers.c */
-int cpu_tricore_handle_mmu_fault(CPUState *cpu, target_ulong address,
-                                 int rw, int mmu_idx);
-#define cpu_handle_mmu_fault cpu_tricore_handle_mmu_fault
+bool tricore_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                          MMUAccessType access_type, int mmu_idx,
+                          bool probe, uintptr_t retaddr);
 
 #endif /* TRICORE_CPU_H */

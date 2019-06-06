@@ -26,7 +26,6 @@
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "internals.h"
-#include "hw/arm/arm.h"
 
 static bool have_guest_debug;
 
@@ -837,6 +836,8 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     if (ret) {
         return ret;
     }
+
+    write_cpustate_to_list(cpu, true);
 
     if (!write_list_to_kvmstate(cpu, level)) {
         return EINVAL;

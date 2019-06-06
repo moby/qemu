@@ -117,7 +117,6 @@ struct MigrationState
 
     /*< public >*/
     size_t bytes_xfer;
-    size_t xfer_limit;
     QemuThread thread;
     QEMUBH *cleanup_bh;
     QEMUFile *to_dst_file;
@@ -219,9 +218,6 @@ struct MigrationState
      */
     bool store_global_state;
 
-    /* Whether the VM is only allowing for migratable devices */
-    bool only_migratable;
-
     /* Whether we send QEMU_VM_CONFIGURATION during migration */
     bool send_configuration;
     /* Whether we send section footer during migration */
@@ -274,7 +270,6 @@ bool migrate_auto_converge(void);
 bool migrate_use_multifd(void);
 bool migrate_pause_before_switchover(void);
 int migrate_multifd_channels(void);
-int migrate_multifd_page_count(void);
 
 int migrate_use_xbzrle(void);
 int64_t migrate_xbzrle_cache_size(void);

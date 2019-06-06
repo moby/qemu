@@ -113,15 +113,13 @@ static int coroutine_fn qed_write_header(BDRVQEDState *s)
     int nsectors = DIV_ROUND_UP(sizeof(QEDHeader), BDRV_SECTOR_SIZE);
     size_t len = nsectors * BDRV_SECTOR_SIZE;
     uint8_t *buf;
-    QEMUIOVector qiov;
     int ret;
 
     assert(s->allocating_acb || s->allocating_write_reqs_plugged);
 
     buf = qemu_blockalign(s->bs, len);
-    qemu_iovec_init_buf(&qiov, buf, len);
 
-    ret = bdrv_co_preadv(s->bs->file, 0, qiov.size, &qiov, 0);
+    ret = bdrv_co_pread(s->bs->file, 0, len, buf, 0);
     if (ret < 0) {
         goto out;
     }
@@ -129,7 +127,7 @@ static int coroutine_fn qed_write_header(BDRVQEDState *s)
     /* Update header */
     qed_header_cpu_to_le(&s->header, (QEDHeader *) buf);
 
-    ret = bdrv_co_pwritev(s->bs->file, 0, qiov.size,  &qiov, 0);
+    ret = bdrv_co_pwrite(s->bs->file, 0, len,  buf, 0);
     if (ret < 0) {
         goto out;
     }
@@ -651,7 +649,8 @@ static int coroutine_fn bdrv_qed_co_create(BlockdevCreateOptions *opts,
         return -EIO;
     }
 
-    blk = blk_new(BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
+    blk = blk_new(bdrv_get_aio_context(bs),
+                  BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
     ret = blk_insert_bs(blk, bs, errp);
     if (ret < 0) {
         goto out;
@@ -1606,8 +1605,9 @@ static void coroutine_fn bdrv_qed_co_invalidate_cache(BlockDriverState *bs,
     }
 }
 
-static int bdrv_qed_co_check(BlockDriverState *bs, BdrvCheckResult *result,
-                             BdrvCheckMode fix)
+static int coroutine_fn bdrv_qed_co_check(BlockDriverState *bs,
+                                          BdrvCheckResult *result,
+                                          BdrvCheckMode fix)
 {
     BDRVQEDState *s = bs->opaque;
     int ret;

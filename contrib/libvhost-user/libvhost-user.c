@@ -130,6 +130,7 @@ vu_request_to_string(unsigned int req)
         REQ(VHOST_USER_POSTCOPY_END),
         REQ(VHOST_USER_GET_INFLIGHT_FD),
         REQ(VHOST_USER_SET_INFLIGHT_FD),
+        REQ(VHOST_USER_GPU_SET_SOCKET),
         REQ(VHOST_USER_MAX),
     };
 #undef REQ
@@ -433,7 +434,7 @@ vu_log_write(VuDev *dev, uint64_t address, uint64_t length)
     page = address / VHOST_LOG_PAGE;
     while (page * VHOST_LOG_PAGE < address + length) {
         vu_log_page(dev->log_table, page);
-        page += VHOST_LOG_PAGE;
+        page += 1;
     }
 
     vu_log_kick(dev);
@@ -542,7 +543,7 @@ static bool
 vu_set_mem_table_exec_postcopy(VuDev *dev, VhostUserMsg *vmsg)
 {
     int i;
-    VhostUserMemory *memory = &vmsg->payload.memory;
+    VhostUserMemory m = vmsg->payload.memory, *memory = &m;
     dev->nregions = memory->nregions;
 
     DPRINT("Nregions: %d\n", memory->nregions);
@@ -621,7 +622,7 @@ vu_set_mem_table_exec_postcopy(VuDev *dev, VhostUserMsg *vmsg)
          * data that's already arrived in the shared process.
          * TODO: How to do hugepage
          */
-        ret = madvise((void *)dev_region->mmap_addr,
+        ret = madvise((void *)(uintptr_t)dev_region->mmap_addr,
                       dev_region->size + dev_region->mmap_offset,
                       MADV_DONTNEED);
         if (ret) {
@@ -633,7 +634,7 @@ vu_set_mem_table_exec_postcopy(VuDev *dev, VhostUserMsg *vmsg)
          * in neighbouring pages.
          * TODO: Turn this backon later.
          */
-        ret = madvise((void *)dev_region->mmap_addr,
+        ret = madvise((void *)(uintptr_t)dev_region->mmap_addr,
                       dev_region->size + dev_region->mmap_offset,
                       MADV_NOHUGEPAGE);
         if (ret) {
@@ -663,10 +664,12 @@ vu_set_mem_table_exec_postcopy(VuDev *dev, VhostUserMsg *vmsg)
                      __func__, i);
             return false;
         }
-        DPRINT("%s: region %d: Registered userfault for %llx + %llx\n",
-                __func__, i, reg_struct.range.start, reg_struct.range.len);
+        DPRINT("%s: region %d: Registered userfault for %"
+               PRIx64 " + %" PRIx64 "\n", __func__, i,
+               (uint64_t)reg_struct.range.start,
+               (uint64_t)reg_struct.range.len);
         /* Now it's registered we can let the client at it */
-        if (mprotect((void *)dev_region->mmap_addr,
+        if (mprotect((void *)(uintptr_t)dev_region->mmap_addr,
                      dev_region->size + dev_region->mmap_offset,
                      PROT_READ | PROT_WRITE)) {
             vu_panic(dev, "failed to mprotect region %d for postcopy (%s)",
@@ -684,7 +687,7 @@ static bool
 vu_set_mem_table_exec(VuDev *dev, VhostUserMsg *vmsg)
 {
     int i;
-    VhostUserMemory *memory = &vmsg->payload.memory;
+    VhostUserMemory m = vmsg->payload.memory, *memory = &m;
 
     for (i = 0; i < dev->nregions; i++) {
         VuDevRegion *r = &dev->regions[i];
@@ -813,7 +816,7 @@ vu_set_vring_num_exec(VuDev *dev, VhostUserMsg *vmsg)
 static bool
 vu_set_vring_addr_exec(VuDev *dev, VhostUserMsg *vmsg)
 {
-    struct vhost_vring_addr *vra = &vmsg->payload.addr;
+    struct vhost_vring_addr addr = vmsg->payload.addr, *vra = &addr;
     unsigned int index = vra->index;
     VuVirtq *vq = &dev->vq[index];
 
@@ -1155,6 +1158,10 @@ vu_get_protocol_features_exec(VuDev *dev, VhostUserMsg *vmsg)
 
     if (have_userfault()) {
         features |= 1ULL << VHOST_USER_PROTOCOL_F_PAGEFAULT;
+    }
+
+    if (dev->iface->get_config && dev->iface->set_config) {
+        features |= 1ULL << VHOST_USER_PROTOCOL_F_CONFIG;
     }
 
     if (dev->iface->get_protocol_features) {

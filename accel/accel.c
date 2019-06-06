@@ -65,8 +65,9 @@ static int accel_init_machine(AccelClass *acc, MachineState *ms)
         ms->accelerator = NULL;
         *(acc->allowed) = false;
         object_unref(OBJECT(accel));
+    } else {
+        object_set_accelerator_compat_props(acc->compat_props);
     }
-    object_set_accelerator_compat_props(acc->compat_props);
     return ret;
 }
 
@@ -104,11 +105,6 @@ void configure_accelerator(MachineState *ms, const char *progname)
     for (tmp = accel_list; !accel_initialised && tmp && *tmp; tmp++) {
         acc = accel_find(*tmp);
         if (!acc) {
-            continue;
-        }
-        if (acc->available && !acc->available()) {
-            printf("%s not supported for this target\n",
-                   acc->name);
             continue;
         }
         ret = accel_init_machine(acc, ms);

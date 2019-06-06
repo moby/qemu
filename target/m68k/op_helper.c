@@ -21,7 +21,7 @@
 #include "exec/helper-proto.h"
 #include "exec/exec-all.h"
 #include "exec/cpu_ldst.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 
 #if defined(CONFIG_USER_ONLY)
 
@@ -35,21 +35,6 @@ static inline void do_interrupt_m68k_hardirq(CPUM68KState *env)
 }
 
 #else
-
-/* Try to fill the TLB and return an exception if error. If retaddr is
-   NULL, it means that the function was called in C code (i.e. not
-   from generated code or from helper.c) */
-void tlb_fill(CPUState *cs, target_ulong addr, int size,
-              MMUAccessType access_type, int mmu_idx, uintptr_t retaddr)
-{
-    int ret;
-
-    ret = m68k_cpu_handle_mmu_fault(cs, addr, size, access_type, mmu_idx);
-    if (unlikely(ret)) {
-        /* now we have a real cpu fault */
-        cpu_loop_exit_restore(cs, retaddr);
-    }
-}
 
 static void cf_rte(CPUM68KState *env)
 {
@@ -454,19 +439,15 @@ static inline void do_interrupt_m68k_hardirq(CPUM68KState *env)
     do_interrupt_all(env, 1);
 }
 
-void m68k_cpu_unassigned_access(CPUState *cs, hwaddr addr, bool is_write,
-                                bool is_exec, int is_asi, unsigned size)
+void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
+                                 unsigned size, MMUAccessType access_type,
+                                 int mmu_idx, MemTxAttrs attrs,
+                                 MemTxResult response, uintptr_t retaddr)
 {
     M68kCPU *cpu = M68K_CPU(cs);
     CPUM68KState *env = &cpu->env;
-#ifdef DEBUG_UNASSIGNED
-    qemu_log_mask(CPU_LOG_INT, "Unassigned " TARGET_FMT_plx " wr=%d exe=%d\n",
-             addr, is_write, is_exec);
-#endif
-    if (env == NULL) {
-        /* when called from gdb, env is NULL */
-        return;
-    }
+
+    cpu_restore_state(cs, retaddr, true);
 
     if (m68k_feature(env, M68K_FEATURE_M68040)) {
         env->mmu.mmusr = 0;
@@ -476,7 +457,7 @@ void m68k_cpu_unassigned_access(CPUState *cs, hwaddr addr, bool is_write,
         if (env->sr & SR_S) { /* SUPERVISOR */
             env->mmu.ssw |= M68K_TM_040_SUPER;
         }
-        if (is_exec) { /* instruction or data */
+        if (access_type == MMU_INST_FETCH) { /* instruction or data */
             env->mmu.ssw |= M68K_TM_040_CODE;
         } else {
             env->mmu.ssw |= M68K_TM_040_DATA;
@@ -494,7 +475,7 @@ void m68k_cpu_unassigned_access(CPUState *cs, hwaddr addr, bool is_write,
             break;
         }
 
-        if (!is_write) {
+        if (access_type != MMU_DATA_STORE) {
             env->mmu.ssw |= M68K_RW_040;
         }
 

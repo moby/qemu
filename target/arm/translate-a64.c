@@ -27,8 +27,9 @@
 #include "translate.h"
 #include "internals.h"
 #include "qemu/host-utils.h"
+#include "qemu/qemu-print.h"
 
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 #include "exec/gen-icount.h"
 
 #include "exec/helper-proto.h"
@@ -151,8 +152,7 @@ static void set_btype(DisasContext *s, int val)
     s->btype = -1;
 }
 
-void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
-                            fprintf_function cpu_fprintf, int flags)
+void aarch64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
@@ -161,13 +161,13 @@ void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
     int el = arm_current_el(env);
     const char *ns_status;
 
-    cpu_fprintf(f, " PC=%016" PRIx64 " ", env->pc);
+    qemu_fprintf(f, " PC=%016" PRIx64 " ", env->pc);
     for (i = 0; i < 32; i++) {
         if (i == 31) {
-            cpu_fprintf(f, " SP=%016" PRIx64 "\n", env->xregs[i]);
+            qemu_fprintf(f, " SP=%016" PRIx64 "\n", env->xregs[i]);
         } else {
-            cpu_fprintf(f, "X%02d=%016" PRIx64 "%s", i, env->xregs[i],
-                        (i + 2) % 3 ? " " : "\n");
+            qemu_fprintf(f, "X%02d=%016" PRIx64 "%s", i, env->xregs[i],
+                         (i + 2) % 3 ? " " : "\n");
         }
     }
 
@@ -176,29 +176,29 @@ void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
     } else {
         ns_status = "";
     }
-    cpu_fprintf(f, "PSTATE=%08x %c%c%c%c %sEL%d%c",
-                psr,
-                psr & PSTATE_N ? 'N' : '-',
-                psr & PSTATE_Z ? 'Z' : '-',
-                psr & PSTATE_C ? 'C' : '-',
-                psr & PSTATE_V ? 'V' : '-',
-                ns_status,
-                el,
-                psr & PSTATE_SP ? 'h' : 't');
+    qemu_fprintf(f, "PSTATE=%08x %c%c%c%c %sEL%d%c",
+                 psr,
+                 psr & PSTATE_N ? 'N' : '-',
+                 psr & PSTATE_Z ? 'Z' : '-',
+                 psr & PSTATE_C ? 'C' : '-',
+                 psr & PSTATE_V ? 'V' : '-',
+                 ns_status,
+                 el,
+                 psr & PSTATE_SP ? 'h' : 't');
 
     if (cpu_isar_feature(aa64_bti, cpu)) {
-        cpu_fprintf(f, "  BTYPE=%d", (psr & PSTATE_BTYPE) >> 10);
+        qemu_fprintf(f, "  BTYPE=%d", (psr & PSTATE_BTYPE) >> 10);
     }
     if (!(flags & CPU_DUMP_FPU)) {
-        cpu_fprintf(f, "\n");
+        qemu_fprintf(f, "\n");
         return;
     }
     if (fp_exception_el(env, el) != 0) {
-        cpu_fprintf(f, "    FPU disabled\n");
+        qemu_fprintf(f, "    FPU disabled\n");
         return;
     }
-    cpu_fprintf(f, "     FPCR=%08x FPSR=%08x\n",
-                vfp_get_fpcr(env), vfp_get_fpsr(env));
+    qemu_fprintf(f, "     FPCR=%08x FPSR=%08x\n",
+                 vfp_get_fpcr(env), vfp_get_fpsr(env));
 
     if (cpu_isar_feature(aa64_sve, cpu) && sve_exception_el(env, el) == 0) {
         int j, zcr_len = sve_zcr_len_for_el(env, el);
@@ -206,11 +206,11 @@ void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
         for (i = 0; i <= FFR_PRED_NUM; i++) {
             bool eol;
             if (i == FFR_PRED_NUM) {
-                cpu_fprintf(f, "FFR=");
+                qemu_fprintf(f, "FFR=");
                 /* It's last, so end the line.  */
                 eol = true;
             } else {
-                cpu_fprintf(f, "P%02d=", i);
+                qemu_fprintf(f, "P%02d=", i);
                 switch (zcr_len) {
                 case 0:
                     eol = i % 8 == 7;
@@ -235,46 +235,46 @@ void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
                 } else {
                     digits = (zcr_len % 4 + 1) * 4;
                 }
-                cpu_fprintf(f, "%0*" PRIx64 "%s", digits,
-                            env->vfp.pregs[i].p[j],
-                            j ? ":" : eol ? "\n" : " ");
+                qemu_fprintf(f, "%0*" PRIx64 "%s", digits,
+                             env->vfp.pregs[i].p[j],
+                             j ? ":" : eol ? "\n" : " ");
             }
         }
 
         for (i = 0; i < 32; i++) {
             if (zcr_len == 0) {
-                cpu_fprintf(f, "Z%02d=%016" PRIx64 ":%016" PRIx64 "%s",
-                            i, env->vfp.zregs[i].d[1],
-                            env->vfp.zregs[i].d[0], i & 1 ? "\n" : " ");
+                qemu_fprintf(f, "Z%02d=%016" PRIx64 ":%016" PRIx64 "%s",
+                             i, env->vfp.zregs[i].d[1],
+                             env->vfp.zregs[i].d[0], i & 1 ? "\n" : " ");
             } else if (zcr_len == 1) {
-                cpu_fprintf(f, "Z%02d=%016" PRIx64 ":%016" PRIx64
-                            ":%016" PRIx64 ":%016" PRIx64 "\n",
-                            i, env->vfp.zregs[i].d[3], env->vfp.zregs[i].d[2],
-                            env->vfp.zregs[i].d[1], env->vfp.zregs[i].d[0]);
+                qemu_fprintf(f, "Z%02d=%016" PRIx64 ":%016" PRIx64
+                             ":%016" PRIx64 ":%016" PRIx64 "\n",
+                             i, env->vfp.zregs[i].d[3], env->vfp.zregs[i].d[2],
+                             env->vfp.zregs[i].d[1], env->vfp.zregs[i].d[0]);
             } else {
                 for (j = zcr_len; j >= 0; j--) {
                     bool odd = (zcr_len - j) % 2 != 0;
                     if (j == zcr_len) {
-                        cpu_fprintf(f, "Z%02d[%x-%x]=", i, j, j - 1);
+                        qemu_fprintf(f, "Z%02d[%x-%x]=", i, j, j - 1);
                     } else if (!odd) {
                         if (j > 0) {
-                            cpu_fprintf(f, "   [%x-%x]=", j, j - 1);
+                            qemu_fprintf(f, "   [%x-%x]=", j, j - 1);
                         } else {
-                            cpu_fprintf(f, "     [%x]=", j);
+                            qemu_fprintf(f, "     [%x]=", j);
                         }
                     }
-                    cpu_fprintf(f, "%016" PRIx64 ":%016" PRIx64 "%s",
-                                env->vfp.zregs[i].d[j * 2 + 1],
-                                env->vfp.zregs[i].d[j * 2],
-                                odd || j == 0 ? "\n" : ":");
+                    qemu_fprintf(f, "%016" PRIx64 ":%016" PRIx64 "%s",
+                                 env->vfp.zregs[i].d[j * 2 + 1],
+                                 env->vfp.zregs[i].d[j * 2],
+                                 odd || j == 0 ? "\n" : ":");
                 }
             }
         }
     } else {
         for (i = 0; i < 32; i++) {
             uint64_t *q = aa64_vfp_qreg(env, i);
-            cpu_fprintf(f, "Q%02d=%016" PRIx64 ":%016" PRIx64 "%s",
-                        i, q[1], q[0], (i & 1 ? "\n" : " "));
+            qemu_fprintf(f, "Q%02d=%016" PRIx64 ":%016" PRIx64 "%s",
+                         i, q[1], q[0], (i & 1 ? "\n" : " "));
         }
     }
 }
@@ -2510,7 +2510,7 @@ static void gen_compare_and_swap_pair(DisasContext *s, int rs, int rt,
         tcg_gen_qemu_ld_i64(d1, clean_addr, memidx,
                             MO_64 | MO_ALIGN_16 | s->be_data);
         tcg_gen_addi_i64(a2, clean_addr, 8);
-        tcg_gen_qemu_ld_i64(d2, clean_addr, memidx, MO_64 | s->be_data);
+        tcg_gen_qemu_ld_i64(d2, a2, memidx, MO_64 | s->be_data);
 
         /* Compare the two words, also in memory order.  */
         tcg_gen_setcond_i64(TCG_COND_EQ, c1, d1, s1);
@@ -4043,8 +4043,8 @@ static void disas_bitfield(DisasContext *s, uint32_t insn)
             tcg_gen_extract_i64(tcg_rd, tcg_tmp, ri, len);
             return;
         }
-        /* opc == 1, BXFIL fall through to deposit */
-        tcg_gen_extract_i64(tcg_tmp, tcg_tmp, ri, len);
+        /* opc == 1, BFXIL fall through to deposit */
+        tcg_gen_shri_i64(tcg_tmp, tcg_tmp, ri);
         pos = 0;
     } else {
         /* Handle the ri > si case with a deposit
@@ -4062,7 +4062,7 @@ static void disas_bitfield(DisasContext *s, uint32_t insn)
         len = ri;
     }
 
-    if (opc == 1) { /* BFM, BXFIL */
+    if (opc == 1) { /* BFM, BFXIL */
         tcg_gen_deposit_i64(tcg_rd, tcg_rd, tcg_tmp, pos, len);
     } else {
         /* SBFM or UBFM: We start with zero, and we haven't modified
@@ -4114,25 +4114,27 @@ static void disas_extract(DisasContext *s, uint32_t insn)
             } else {
                 tcg_gen_ext32u_i64(tcg_rd, cpu_reg(s, rm));
             }
-        } else if (rm == rn) { /* ROR */
-            tcg_rm = cpu_reg(s, rm);
-            if (sf) {
-                tcg_gen_rotri_i64(tcg_rd, tcg_rm, imm);
-            } else {
-                TCGv_i32 tmp = tcg_temp_new_i32();
-                tcg_gen_extrl_i64_i32(tmp, tcg_rm);
-                tcg_gen_rotri_i32(tmp, tmp, imm);
-                tcg_gen_extu_i32_i64(tcg_rd, tmp);
-                tcg_temp_free_i32(tmp);
-            }
         } else {
-            tcg_rm = read_cpu_reg(s, rm, sf);
-            tcg_rn = read_cpu_reg(s, rn, sf);
-            tcg_gen_shri_i64(tcg_rm, tcg_rm, imm);
-            tcg_gen_shli_i64(tcg_rn, tcg_rn, bitsize - imm);
-            tcg_gen_or_i64(tcg_rd, tcg_rm, tcg_rn);
-            if (!sf) {
-                tcg_gen_ext32u_i64(tcg_rd, tcg_rd);
+            tcg_rm = cpu_reg(s, rm);
+            tcg_rn = cpu_reg(s, rn);
+
+            if (sf) {
+                /* Specialization to ROR happens in EXTRACT2.  */
+                tcg_gen_extract2_i64(tcg_rd, tcg_rm, tcg_rn, imm);
+            } else {
+                TCGv_i32 t0 = tcg_temp_new_i32();
+
+                tcg_gen_extrl_i64_i32(t0, tcg_rm);
+                if (rm == rn) {
+                    tcg_gen_rotri_i32(t0, t0, imm);
+                } else {
+                    TCGv_i32 t1 = tcg_temp_new_i32();
+                    tcg_gen_extrl_i64_i32(t1, tcg_rn);
+                    tcg_gen_extract2_i32(t0, t0, t1, imm);
+                    tcg_temp_free_i32(t1);
+                }
+                tcg_gen_extu_i32_i64(tcg_rd, t0);
+                tcg_temp_free_i32(t0);
             }
         }
     }
@@ -9468,11 +9470,7 @@ static void handle_2misc_64(DisasContext *s, int opcode, bool u,
         if (u) {
             tcg_gen_neg_i64(tcg_rd, tcg_rn);
         } else {
-            TCGv_i64 tcg_zero = tcg_const_i64(0);
-            tcg_gen_neg_i64(tcg_rd, tcg_rn);
-            tcg_gen_movcond_i64(TCG_COND_GT, tcg_rd, tcg_rn, tcg_zero,
-                                tcg_rn, tcg_rd);
-            tcg_temp_free_i64(tcg_zero);
+            tcg_gen_abs_i64(tcg_rd, tcg_rn);
         }
         break;
     case 0x2f: /* FABS */
@@ -12366,11 +12364,12 @@ static void disas_simd_two_reg_misc(DisasContext *s, uint32_t insn)
         }
         break;
     case 0xb:
-        if (u) { /* NEG */
+        if (u) { /* ABS, NEG */
             gen_gvec_fn2(s, is_q, rd, rn, tcg_gen_gvec_neg, size);
-            return;
+        } else {
+            gen_gvec_fn2(s, is_q, rd, rn, tcg_gen_gvec_abs, size);
         }
-        break;
+        return;
     }
 
     if (size == 3) {
@@ -12436,17 +12435,6 @@ static void disas_simd_two_reg_misc(DisasContext *s, uint32_t insn)
                         gen_helper_neon_qneg_s32(tcg_res, cpu_env, tcg_op);
                     } else {
                         gen_helper_neon_qabs_s32(tcg_res, cpu_env, tcg_op);
-                    }
-                    break;
-                case 0xb: /* ABS, NEG */
-                    if (u) {
-                        tcg_gen_neg_i32(tcg_res, tcg_op);
-                    } else {
-                        TCGv_i32 tcg_zero = tcg_const_i32(0);
-                        tcg_gen_neg_i32(tcg_res, tcg_op);
-                        tcg_gen_movcond_i32(TCG_COND_GT, tcg_res, tcg_op,
-                                            tcg_zero, tcg_op, tcg_res);
-                        tcg_temp_free_i32(tcg_zero);
                     }
                     break;
                 case 0x2f: /* FABS */
@@ -12561,23 +12549,6 @@ static void disas_simd_two_reg_misc(DisasContext *s, uint32_t insn)
                     tcg_temp_free_i32(tcg_zero);
                     break;
                 }
-                case 0xb: /* ABS, NEG */
-                    if (u) {
-                        TCGv_i32 tcg_zero = tcg_const_i32(0);
-                        if (size) {
-                            gen_helper_neon_sub_u16(tcg_res, tcg_zero, tcg_op);
-                        } else {
-                            gen_helper_neon_sub_u8(tcg_res, tcg_zero, tcg_op);
-                        }
-                        tcg_temp_free_i32(tcg_zero);
-                    } else {
-                        if (size) {
-                            gen_helper_neon_abs_s16(tcg_res, tcg_op);
-                        } else {
-                            gen_helper_neon_abs_s8(tcg_res, tcg_op);
-                        }
-                    }
-                    break;
                 case 0x4: /* CLS, CLZ */
                     if (u) {
                         if (size == 0) {

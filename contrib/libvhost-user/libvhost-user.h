@@ -94,6 +94,7 @@ typedef enum VhostUserRequest {
     VHOST_USER_POSTCOPY_END     = 30,
     VHOST_USER_GET_INFLIGHT_FD = 31,
     VHOST_USER_SET_INFLIGHT_FD = 32,
+    VHOST_USER_GPU_SET_SOCKET = 33,
     VHOST_USER_MAX
 } VhostUserRequest;
 
@@ -148,7 +149,7 @@ typedef struct VhostUserInflight {
     uint16_t queue_size;
 } VhostUserInflight;
 
-#if defined(_WIN32)
+#if defined(_WIN32) && (defined(__x86_64__) || defined(__i386__))
 # define VU_PACKED __attribute__((gcc_struct, packed))
 #else
 # define VU_PACKED __attribute__((packed))

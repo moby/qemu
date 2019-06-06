@@ -177,6 +177,7 @@ static void rtas_start_cpu(PowerPCCPU *callcpu, SpaprMachineState *spapr,
         } else {
             lpcr &= ~(LPCR_UPRT | LPCR_GTSE | LPCR_HR);
         }
+        env->spr[SPR_PSSCR] &= ~PSSCR_EC;
     }
     ppc_store_lpcr(newcpu, lpcr);
 
@@ -205,8 +206,11 @@ static void rtas_stop_self(PowerPCCPU *cpu, SpaprMachineState *spapr,
 
     /* Disable Power-saving mode Exit Cause exceptions for the CPU.
      * This could deliver an interrupt on a dying CPU and crash the
-     * guest */
+     * guest.
+     * For the same reason, set PSSCR_EC.
+     */
     ppc_store_lpcr(cpu, env->spr[SPR_LPCR] & ~pcc->lpcr_pm);
+    env->spr[SPR_PSSCR] |= PSSCR_EC;
     cs->halted = 1;
     kvmppc_set_reg_ppc_online(cpu, 0);
     qemu_cpu_kick(cs);
@@ -404,7 +408,7 @@ void spapr_rtas_register(int token, const char *name, spapr_rtas_fn fn)
 
     token -= RTAS_TOKEN_BASE;
 
-    assert(!rtas_table[token].name);
+    assert(!name || !rtas_table[token].name);
 
     rtas_table[token].name = name;
     rtas_table[token].fn = fn;

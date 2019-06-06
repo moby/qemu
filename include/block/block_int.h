@@ -691,6 +691,10 @@ struct BdrvChildRole {
      * can update its reference. */
     int (*update_filename)(BdrvChild *child, BlockDriverState *new_base,
                            const char *filename, Error **errp);
+
+    bool (*can_set_aio_ctx)(BdrvChild *child, AioContext *ctx,
+                            GSList **ignore, Error **errp);
+    void (*set_aio_ctx)(BdrvChild *child, AioContext *ctx, GSList **ignore);
 };
 
 extern const BdrvChildRole child_file;
@@ -925,6 +929,22 @@ int coroutine_fn bdrv_co_pwritev(BdrvChild *child,
     int64_t offset, unsigned int bytes, QEMUIOVector *qiov,
     BdrvRequestFlags flags);
 
+static inline int coroutine_fn bdrv_co_pread(BdrvChild *child,
+    int64_t offset, unsigned int bytes, void *buf, BdrvRequestFlags flags)
+{
+    QEMUIOVector qiov = QEMU_IOVEC_INIT_BUF(qiov, buf, bytes);
+
+    return bdrv_co_preadv(child, offset, bytes, &qiov, flags);
+}
+
+static inline int coroutine_fn bdrv_co_pwrite(BdrvChild *child,
+    int64_t offset, unsigned int bytes, void *buf, BdrvRequestFlags flags)
+{
+    QEMUIOVector qiov = QEMU_IOVEC_INIT_BUF(qiov, buf, bytes);
+
+    return bdrv_co_pwritev(child, offset, bytes, &qiov, flags);
+}
+
 extern unsigned int bdrv_drain_all_count;
 void bdrv_apply_subtree_drain(BdrvChild *child, BlockDriverState *new_parent);
 void bdrv_unapply_subtree_drain(BdrvChild *child, BlockDriverState *old_parent);
@@ -945,27 +965,6 @@ void bdrv_parse_filename_strip_prefix(const char *filename, const char *prefix,
  */
 void bdrv_add_before_write_notifier(BlockDriverState *bs,
                                     NotifierWithReturn *notifier);
-
-/**
- * bdrv_detach_aio_context:
- *
- * May be called from .bdrv_detach_aio_context() to detach children from the
- * current #AioContext.  This is only needed by block drivers that manage their
- * own children.  Both ->file and ->backing are automatically handled and
- * block drivers should not call this function on them explicitly.
- */
-void bdrv_detach_aio_context(BlockDriverState *bs);
-
-/**
- * bdrv_attach_aio_context:
- *
- * May be called from .bdrv_attach_aio_context() to attach children to the new
- * #AioContext.  This is only needed by block drivers that manage their own
- * children.  Both ->file and ->backing are automatically handled and block
- * drivers should not call this function on them explicitly.
- */
-void bdrv_attach_aio_context(BlockDriverState *bs,
-                             AioContext *new_context);
 
 /**
  * bdrv_add_aio_context_notifier:
@@ -1164,6 +1163,7 @@ void hmp_drive_add_node(Monitor *mon, const char *optstr);
 BdrvChild *bdrv_root_attach_child(BlockDriverState *child_bs,
                                   const char *child_name,
                                   const BdrvChildRole *child_role,
+                                  AioContext *ctx,
                                   uint64_t perm, uint64_t shared_perm,
                                   void *opaque, Error **errp);
 void bdrv_root_unref_child(BdrvChild *child);

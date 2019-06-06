@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef QAUTHZ_PAM_H__
-#define QAUTHZ_PAM_H__
+#ifndef QAUTHZ_PAMACCT_H
+#define QAUTHZ_PAMACCT_H
 
 #include "authz/base.h"
 
@@ -33,8 +33,8 @@
      OBJECT_GET_CLASS(QAuthZPAMClass, (obj), \
                       TYPE_QAUTHZ_PAM)
 #define QAUTHZ_PAM(obj) \
-     INTERFACE_CHECK(QAuthZPAM, (obj), \
-                     TYPE_QAUTHZ_PAM)
+     OBJECT_CHECK(QAuthZPAM, (obj), \
+                  TYPE_QAUTHZ_PAM)
 
 typedef struct QAuthZPAM QAuthZPAM;
 typedef struct QAuthZPAMClass QAuthZPAMClass;
@@ -96,5 +96,4 @@ QAuthZPAM *qauthz_pam_new(const char *id,
                           const char *service,
                           Error **errp);
 
-
-#endif /* QAUTHZ_PAM_H__ */
+#endif /* QAUTHZ_PAMACCT_H */

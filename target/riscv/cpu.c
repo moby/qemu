@@ -18,10 +18,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/qemu-print.h"
 #include "qemu/log.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "qapi/error.h"
+#include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 
 /* RISC-V CPU definitions */
@@ -29,17 +31,17 @@
 static const char riscv_exts[26] = "IEMAFDQCLBJTPVNSUHKORWXYZG";
 
 const char * const riscv_int_regnames[] = {
-  "zero", "ra  ", "sp  ", "gp  ", "tp  ", "t0  ", "t1  ", "t2  ",
-  "s0  ", "s1  ", "a0  ", "a1  ", "a2  ", "a3  ", "a4  ", "a5  ",
-  "a6  ", "a7  ", "s2  ", "s3  ", "s4  ", "s5  ", "s6  ", "s7  ",
-  "s8  ", "s9  ", "s10 ", "s11 ", "t3  ", "t4  ", "t5  ", "t6  "
+  "zero", "ra", "sp",  "gp",  "tp", "t0", "t1", "t2",
+  "s0",   "s1", "a0",  "a1",  "a2", "a3", "a4", "a5",
+  "a6",   "a7", "s2",  "s3",  "s4", "s5", "s6", "s7",
+  "s8",   "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
 
 const char * const riscv_fpr_regnames[] = {
-  "ft0 ", "ft1 ", "ft2 ", "ft3 ", "ft4 ", "ft5 ", "ft6 ",  "ft7 ",
-  "fs0 ", "fs1 ", "fa0 ", "fa1 ", "fa2 ", "fa3 ", "fa4 ",  "fa5 ",
-  "fa6 ", "fa7 ", "fs2 ", "fs3 ", "fs4 ", "fs5 ", "fs6 ",  "fs7 ",
-  "fs8 ", "fs9 ", "fs10", "fs11", "ft8 ", "ft9 ", "ft10",  "ft11"
+  "ft0", "ft1", "ft2",  "ft3",  "ft4", "ft5", "ft6",  "ft7",
+  "fs0", "fs1", "fa0",  "fa1",  "fa2", "fa3", "fa4",  "fa5",
+  "fa6", "fa7", "fs2",  "fs3",  "fs4", "fs5", "fs6",  "fs7",
+  "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"
 };
 
 const char * const riscv_excp_names[] = {
@@ -80,12 +82,6 @@ const char * const riscv_intr_names[] = {
     "reserved"
 };
 
-typedef struct RISCVCPUInfo {
-    const int bit_widths;
-    const char *name;
-    void (*initfn)(Object *obj);
-} RISCVCPUInfo;
-
 static void set_misa(CPURISCVState *env, target_ulong misa)
 {
     env->misa_mask = env->misa = misa;
@@ -119,6 +115,12 @@ static void riscv_any_cpu_init(Object *obj)
 
 #if defined(TARGET_RISCV32)
 
+static void riscv_base32_cpu_init(Object *obj)
+{
+    CPURISCVState *env = &RISCV_CPU(obj)->env;
+    set_misa(env, RV32 | RVI | RVM | RVA | RVF | RVD | RVC | RVS | RVU);
+}
+
 static void rv32gcsu_priv1_09_1_cpu_init(Object *obj)
 {
     CPURISCVState *env = &RISCV_CPU(obj)->env;
@@ -149,6 +151,12 @@ static void rv32imacu_nommu_cpu_init(Object *obj)
 }
 
 #elif defined(TARGET_RISCV64)
+
+static void riscv_base64_cpu_init(Object *obj)
+{
+    CPURISCVState *env = &RISCV_CPU(obj)->env;
+    set_misa(env, RV64 | RVI | RVM | RVA | RVF | RVD | RVC | RVS | RVU);
+}
 
 static void rv64gcsu_priv1_09_1_cpu_init(Object *obj)
 {
@@ -199,40 +207,39 @@ static ObjectClass *riscv_cpu_class_by_name(const char *cpu_model)
     return oc;
 }
 
-static void riscv_cpu_dump_state(CPUState *cs, FILE *f,
-    fprintf_function cpu_fprintf, int flags)
+static void riscv_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
     int i;
 
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "pc      ", env->pc);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "pc      ", env->pc);
 #ifndef CONFIG_USER_ONLY
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mhartid ", env->mhartid);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mstatus ", env->mstatus);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mip     ",
-        (target_ulong)atomic_read(&env->mip));
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mie     ", env->mie);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mideleg ", env->mideleg);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "medeleg ", env->medeleg);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mtvec   ", env->mtvec);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mepc    ", env->mepc);
-    cpu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mcause  ", env->mcause);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mhartid ", env->mhartid);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mstatus ", env->mstatus);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mip     ",
+                 (target_ulong)atomic_read(&env->mip));
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mie     ", env->mie);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mideleg ", env->mideleg);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "medeleg ", env->medeleg);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mtvec   ", env->mtvec);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mepc    ", env->mepc);
+    qemu_fprintf(f, " %s " TARGET_FMT_lx "\n", "mcause  ", env->mcause);
 #endif
 
     for (i = 0; i < 32; i++) {
-        cpu_fprintf(f, " %s " TARGET_FMT_lx,
-            riscv_int_regnames[i], env->gpr[i]);
+        qemu_fprintf(f, " %s " TARGET_FMT_lx,
+                     riscv_int_regnames[i], env->gpr[i]);
         if ((i & 3) == 3) {
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         }
     }
     if (flags & CPU_DUMP_FPU) {
         for (i = 0; i < 32; i++) {
-            cpu_fprintf(f, " %s %016" PRIx64,
-                riscv_fpr_regnames[i], env->fpr[i]);
+            qemu_fprintf(f, " %s %016" PRIx64,
+                         riscv_fpr_regnames[i], env->fpr[i]);
             if ((i & 3) == 3) {
-                cpu_fprintf(f, "\n");
+                qemu_fprintf(f, "\n");
             }
         }
     }
@@ -302,7 +309,11 @@ static void riscv_cpu_disas_set_info(CPUState *s, disassemble_info *info)
 static void riscv_cpu_realize(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
+    RISCVCPU *cpu = RISCV_CPU(dev);
+    CPURISCVState *env = &cpu->env;
     RISCVCPUClass *mcc = RISCV_CPU_GET_CLASS(dev);
+    int priv_version = PRIV_VERSION_1_10_0;
+    int user_version = USER_VERSION_2_02_0;
     Error *local_err = NULL;
 
     cpu_exec_realizefn(cs, &local_err);
@@ -310,6 +321,43 @@ static void riscv_cpu_realize(DeviceState *dev, Error **errp)
         error_propagate(errp, local_err);
         return;
     }
+
+    if (cpu->cfg.priv_spec) {
+        if (!g_strcmp0(cpu->cfg.priv_spec, "v1.10.0")) {
+            priv_version = PRIV_VERSION_1_10_0;
+        } else if (!g_strcmp0(cpu->cfg.priv_spec, "v1.9.1")) {
+            priv_version = PRIV_VERSION_1_09_1;
+        } else {
+            error_setg(errp,
+                       "Unsupported privilege spec version '%s'",
+                       cpu->cfg.priv_spec);
+            return;
+        }
+    }
+
+    if (cpu->cfg.user_spec) {
+        if (!g_strcmp0(cpu->cfg.user_spec, "v2.02.0")) {
+            user_version = USER_VERSION_2_02_0;
+        } else {
+            error_setg(errp,
+                       "Unsupported user spec version '%s'",
+                       cpu->cfg.user_spec);
+            return;
+        }
+    }
+
+    set_versions(env, user_version, priv_version);
+    set_resetvec(env, DEFAULT_RSTVEC);
+
+    if (cpu->cfg.mmu) {
+        set_feature(env, RISCV_FEATURE_MMU);
+    }
+
+    if (cpu->cfg.pmp) {
+        set_feature(env, RISCV_FEATURE_PMP);
+    }
+
+    riscv_cpu_register_gdb_regs_for_features(cs);
 
     qemu_init_vcpu(cs);
     cpu_reset(cs);
@@ -328,6 +376,14 @@ static void riscv_cpu_init(Object *obj)
 static const VMStateDescription vmstate_riscv_cpu = {
     .name = "cpu",
     .unmigratable = 1,
+};
+
+static Property riscv_cpu_properties[] = {
+    DEFINE_PROP_STRING("priv_spec", RISCVCPU, cfg.priv_spec),
+    DEFINE_PROP_STRING("user_spec", RISCVCPU, cfg.user_spec),
+    DEFINE_PROP_BOOL("mmu", RISCVCPU, cfg.mmu, true),
+    DEFINE_PROP_BOOL("pmp", RISCVCPU, cfg.pmp, true),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void riscv_cpu_class_init(ObjectClass *c, void *data)
@@ -351,20 +407,25 @@ static void riscv_cpu_class_init(ObjectClass *c, void *data)
     cc->synchronize_from_tb = riscv_cpu_synchronize_from_tb;
     cc->gdb_read_register = riscv_cpu_gdb_read_register;
     cc->gdb_write_register = riscv_cpu_gdb_write_register;
-    cc->gdb_num_core_regs = 65;
+    cc->gdb_num_core_regs = 33;
+#if defined(TARGET_RISCV32)
+    cc->gdb_core_xml_file = "riscv-32bit-cpu.xml";
+#elif defined(TARGET_RISCV64)
+    cc->gdb_core_xml_file = "riscv-64bit-cpu.xml";
+#endif
     cc->gdb_stop_before_watchpoint = true;
     cc->disas_set_info = riscv_cpu_disas_set_info;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = riscv_cpu_handle_mmu_fault;
-#else
+#ifndef CONFIG_USER_ONLY
     cc->do_unaligned_access = riscv_cpu_do_unaligned_access;
     cc->get_phys_page_debug = riscv_cpu_get_phys_page_debug;
 #endif
 #ifdef CONFIG_TCG
     cc->tcg_initialize = riscv_translate_init;
+    cc->tlb_fill = riscv_cpu_tlb_fill;
 #endif
     /* For now, mark unmigratable: */
     cc->vmsd = &vmstate_riscv_cpu;
+    dc->props = riscv_cpu_properties;
 }
 
 char *riscv_isa_string(RISCVCPU *cpu)
@@ -382,11 +443,6 @@ char *riscv_isa_string(RISCVCPU *cpu)
     return isa_str;
 }
 
-typedef struct RISCVCPUListState {
-    fprintf_function cpu_fprintf;
-    FILE *file;
-} RISCVCPUListState;
-
 static gint riscv_cpu_list_compare(gconstpointer a, gconstpointer b)
 {
     ObjectClass *class_a = (ObjectClass *)a;
@@ -400,24 +456,19 @@ static gint riscv_cpu_list_compare(gconstpointer a, gconstpointer b)
 
 static void riscv_cpu_list_entry(gpointer data, gpointer user_data)
 {
-    RISCVCPUListState *s = user_data;
     const char *typename = object_class_get_name(OBJECT_CLASS(data));
     int len = strlen(typename) - strlen(RISCV_CPU_TYPE_SUFFIX);
 
-    (*s->cpu_fprintf)(s->file, "%.*s\n", len, typename);
+    qemu_printf("%.*s\n", len, typename);
 }
 
-void riscv_cpu_list(FILE *f, fprintf_function cpu_fprintf)
+void riscv_cpu_list(void)
 {
-    RISCVCPUListState s = {
-        .cpu_fprintf = cpu_fprintf,
-        .file = f,
-    };
     GSList *list;
 
     list = object_class_get_list(TYPE_RISCV_CPU, false);
     list = g_slist_sort(list, riscv_cpu_list_compare);
-    g_slist_foreach(list, riscv_cpu_list_entry, &s);
+    g_slist_foreach(list, riscv_cpu_list_entry, NULL);
     g_slist_free(list);
 }
 
@@ -440,12 +491,14 @@ static const TypeInfo riscv_cpu_type_infos[] = {
     },
     DEFINE_CPU(TYPE_RISCV_CPU_ANY,              riscv_any_cpu_init),
 #if defined(TARGET_RISCV32)
+    DEFINE_CPU(TYPE_RISCV_CPU_BASE32,           riscv_base32_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV32GCSU_V1_09_1, rv32gcsu_priv1_09_1_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV32GCSU_V1_10_0, rv32gcsu_priv1_10_0_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV32IMACU_NOMMU,  rv32imacu_nommu_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_SIFIVE_E31,       rv32imacu_nommu_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_SIFIVE_U34,       rv32gcsu_priv1_10_0_cpu_init)
 #elif defined(TARGET_RISCV64)
+    DEFINE_CPU(TYPE_RISCV_CPU_BASE64,           riscv_base64_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV64GCSU_V1_09_1, rv64gcsu_priv1_09_1_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV64GCSU_V1_10_0, rv64gcsu_priv1_10_0_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_RV64IMACU_NOMMU,  rv64imacu_nommu_cpu_init),

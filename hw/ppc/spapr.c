@@ -500,7 +500,10 @@ static void spapr_populate_cpu_dt(CPUState *cs, void *fdt, int offset,
     _FDT((fdt_setprop(fdt, offset, "64-bit", NULL, 0)));
 
     if (env->spr_cb[SPR_PURR].oea_read) {
-        _FDT((fdt_setprop(fdt, offset, "ibm,purr", NULL, 0)));
+        _FDT((fdt_setprop_cell(fdt, offset, "ibm,purr", 1)));
+    }
+    if (env->spr_cb[SPR_SPURR].oea_read) {
+        _FDT((fdt_setprop_cell(fdt, offset, "ibm,spurr", 1)));
     }
 
     if (ppc_hash64_has(cpu, PPC_HASH64_1TSEG)) {
@@ -1034,12 +1037,13 @@ static void spapr_dt_rtas(SpaprMachineState *spapr, void *fdt)
         0, cpu_to_be32(SPAPR_MEMORY_BLOCK_SIZE),
         cpu_to_be32(max_cpus / smp_threads),
     };
+    uint32_t maxdomain = cpu_to_be32(spapr->gpu_numa_id > 1 ? 1 : 0);
     uint32_t maxdomains[] = {
         cpu_to_be32(4),
-        cpu_to_be32(0),
-        cpu_to_be32(0),
-        cpu_to_be32(0),
-        cpu_to_be32(nb_numa_nodes ? nb_numa_nodes : 1),
+        maxdomain,
+        maxdomain,
+        maxdomain,
+        cpu_to_be32(spapr->gpu_numa_id),
     };
 
     _FDT(rtas = fdt_add_subnode(fdt, 0, "rtas"));
@@ -1252,38 +1256,8 @@ static void *spapr_build_fdt(SpaprMachineState *spapr)
     _FDT(fdt_setprop_string(fdt, 0, "model", "IBM pSeries (emulated by qemu)"));
     _FDT(fdt_setprop_string(fdt, 0, "compatible", "qemu,pseries"));
 
-    /*
-     * Add info to guest to indentify which host is it being run on
-     * and what is the uuid of the guest
-     */
-    if (spapr->host_model && !g_str_equal(spapr->host_model, "none")) {
-        if (g_str_equal(spapr->host_model, "passthrough")) {
-            /* -M host-model=passthrough */
-            if (kvmppc_get_host_model(&buf)) {
-                _FDT(fdt_setprop_string(fdt, 0, "host-model", buf));
-                g_free(buf);
-            }
-        } else {
-            /* -M host-model=<user-string> */
-            _FDT(fdt_setprop_string(fdt, 0, "host-model", spapr->host_model));
-        }
-    }
-
-    if (spapr->host_serial && !g_str_equal(spapr->host_serial, "none")) {
-        if (g_str_equal(spapr->host_serial, "passthrough")) {
-            /* -M host-serial=passthrough */
-            if (kvmppc_get_host_serial(&buf)) {
-                _FDT(fdt_setprop_string(fdt, 0, "host-serial", buf));
-                g_free(buf);
-            }
-        } else {
-            /* -M host-serial=<user-string> */
-            _FDT(fdt_setprop_string(fdt, 0, "host-serial", spapr->host_serial));
-        }
-    }
-
+    /* Guest UUID & Name*/
     buf = qemu_uuid_unparse_strdup(&qemu_uuid);
-
     _FDT(fdt_setprop_string(fdt, 0, "vm,uuid", buf));
     if (qemu_uuid_set) {
         _FDT(fdt_setprop_string(fdt, 0, "system-id", buf));
@@ -1293,6 +1267,21 @@ static void *spapr_build_fdt(SpaprMachineState *spapr)
     if (qemu_get_vm_name()) {
         _FDT(fdt_setprop_string(fdt, 0, "ibm,partition-name",
                                 qemu_get_vm_name()));
+    }
+
+    /* Host Model & Serial Number */
+    if (spapr->host_model) {
+        _FDT(fdt_setprop_string(fdt, 0, "host-model", spapr->host_model));
+    } else if (smc->broken_host_serial_model && kvmppc_get_host_model(&buf)) {
+        _FDT(fdt_setprop_string(fdt, 0, "host-model", buf));
+        g_free(buf);
+    }
+
+    if (spapr->host_serial) {
+        _FDT(fdt_setprop_string(fdt, 0, "host-serial", spapr->host_serial));
+    } else if (smc->broken_host_serial_model && kvmppc_get_host_serial(&buf)) {
+        _FDT(fdt_setprop_string(fdt, 0, "host-serial", buf));
+        g_free(buf);
     }
 
     _FDT(fdt_setprop_cell(fdt, 0, "#address-cells", 2));
@@ -1534,10 +1523,10 @@ static void spapr_unmap_hptes(PPCVirtualHypervisor *vhyp,
     /* Nothing to do for qemu managed HPT */
 }
 
-static void spapr_store_hpte(PPCVirtualHypervisor *vhyp, hwaddr ptex,
-                             uint64_t pte0, uint64_t pte1)
+void spapr_store_hpte(PowerPCCPU *cpu, hwaddr ptex,
+                      uint64_t pte0, uint64_t pte1)
 {
-    SpaprMachineState *spapr = SPAPR_MACHINE(vhyp);
+    SpaprMachineState *spapr = SPAPR_MACHINE(cpu->vhyp);
     hwaddr offset = ptex * HASH_PTE_SIZE_64;
 
     if (!spapr->htab) {
@@ -1563,6 +1552,38 @@ static void spapr_store_hpte(PPCVirtualHypervisor *vhyp, hwaddr ptex,
             stq_p(spapr->htab + offset + HASH_PTE_SIZE_64 / 2, pte1);
         }
     }
+}
+
+static void spapr_hpte_set_c(PPCVirtualHypervisor *vhyp, hwaddr ptex,
+                             uint64_t pte1)
+{
+    hwaddr offset = ptex * HASH_PTE_SIZE_64 + 15;
+    SpaprMachineState *spapr = SPAPR_MACHINE(vhyp);
+
+    if (!spapr->htab) {
+        /* There should always be a hash table when this is called */
+        error_report("spapr_hpte_set_c called with no hash table !");
+        return;
+    }
+
+    /* The HW performs a non-atomic byte update */
+    stb_p(spapr->htab + offset, (pte1 & 0xff) | 0x80);
+}
+
+static void spapr_hpte_set_r(PPCVirtualHypervisor *vhyp, hwaddr ptex,
+                             uint64_t pte1)
+{
+    hwaddr offset = ptex * HASH_PTE_SIZE_64 + 14;
+    SpaprMachineState *spapr = SPAPR_MACHINE(vhyp);
+
+    if (!spapr->htab) {
+        /* There should always be a hash table when this is called */
+        error_report("spapr_hpte_set_r called with no hash table !");
+        return;
+    }
+
+    /* The HW performs a non-atomic byte update */
+    stb_p(spapr->htab + offset, ((pte1 >> 8) & 0xff) | 0x01);
 }
 
 int spapr_hpt_shift_for_ramsize(uint64_t ramsize)
@@ -1713,6 +1734,16 @@ static void spapr_machine_reset(void)
         spapr_irq_msi_reset(spapr);
     }
 
+    /*
+     * NVLink2-connected GPU RAM needs to be placed on a separate NUMA node.
+     * We assign a new numa ID per GPU in spapr_pci_collect_nvgpu() which is
+     * called from vPHB reset handler so we initialize the counter here.
+     * If no NUMA is configured from the QEMU side, we start from 1 as GPU RAM
+     * must be equally distant from any other node.
+     * The final value of spapr->gpu_numa_id is going to be written to
+     * max-associativity-domains in spapr_build_fdt().
+     */
+    spapr->gpu_numa_id = MAX(1, nb_numa_nodes);
     qemu_devices_reset();
 
     /*
@@ -2094,6 +2125,7 @@ static const VMStateDescription vmstate_spapr = {
         &vmstate_spapr_cap_cfpc,
         &vmstate_spapr_cap_sbbc,
         &vmstate_spapr_cap_ibs,
+        &vmstate_spapr_cap_hpt_maxpagesize,
         &vmstate_spapr_irq_map,
         &vmstate_spapr_cap_nested_kvm_hv,
         &vmstate_spapr_dtb,
@@ -2795,13 +2827,7 @@ static void spapr_machine_init(MachineState *machine)
 
     /* advertise XIVE on POWER9 machines */
     if (spapr->irq->ov5 & (SPAPR_OV5_XIVE_EXPLOIT | SPAPR_OV5_XIVE_BOTH)) {
-        if (ppc_type_check_compat(machine->cpu_type, CPU_POWERPC_LOGICAL_3_00,
-                                  0, spapr->max_compat_pvr)) {
-            spapr_ovec_set(spapr->ov5, OV5_XIVE_EXPLOIT);
-        } else if (spapr->irq->ov5 & SPAPR_OV5_XIVE_EXPLOIT) {
-            error_report("XIVE-only machines require a POWER9 CPU");
-            exit(1);
-        }
+        spapr_ovec_set(spapr->ov5, OV5_XIVE_EXPLOIT);
     }
 
     /* init CPUs */
@@ -3352,12 +3378,12 @@ static void spapr_instance_init(Object *obj)
         spapr_get_host_model, spapr_set_host_model,
         &error_abort);
     object_property_set_description(obj, "host-model",
-        "Set host's model-id to use - none|passthrough|string", &error_abort);
+        "Host model to advertise in guest device tree", &error_abort);
     object_property_add_str(obj, "host-serial",
         spapr_get_host_serial, spapr_set_host_serial,
         &error_abort);
     object_property_set_description(obj, "host-serial",
-        "Set host's system-id to use - none|passthrough|string", &error_abort);
+        "Host serial number to advertise in guest device tree", &error_abort);
 }
 
 static void spapr_machine_finalizefn(Object *obj)
@@ -3928,7 +3954,9 @@ static void spapr_phb_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
     smc->phb_placement(spapr, sphb->index,
                        &sphb->buid, &sphb->io_win_addr,
                        &sphb->mem_win_addr, &sphb->mem64_win_addr,
-                       windows_supported, sphb->dma_liobn, errp);
+                       windows_supported, sphb->dma_liobn,
+                       &sphb->nv2_gpa_win_addr, &sphb->nv2_atsd_win_addr,
+                       errp);
 }
 
 static void spapr_phb_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
@@ -4129,7 +4157,8 @@ static const CPUArchIdList *spapr_possible_cpu_arch_ids(MachineState *machine)
 static void spapr_phb_placement(SpaprMachineState *spapr, uint32_t index,
                                 uint64_t *buid, hwaddr *pio,
                                 hwaddr *mmio32, hwaddr *mmio64,
-                                unsigned n_dma, uint32_t *liobns, Error **errp)
+                                unsigned n_dma, uint32_t *liobns,
+                                hwaddr *nv2gpa, hwaddr *nv2atsd, Error **errp)
 {
     /*
      * New-style PHB window placement.
@@ -4174,6 +4203,9 @@ static void spapr_phb_placement(SpaprMachineState *spapr, uint32_t index,
     *pio = SPAPR_PCI_BASE + index * SPAPR_PCI_IO_WIN_SIZE;
     *mmio32 = SPAPR_PCI_BASE + (index + 1) * SPAPR_PCI_MEM32_WIN_SIZE;
     *mmio64 = SPAPR_PCI_BASE + (index + 1) * SPAPR_PCI_MEM64_WIN_SIZE;
+
+    *nv2gpa = SPAPR_PCI_NV2RAM64_WIN_BASE + index * SPAPR_PCI_NV2RAM64_WIN_SIZE;
+    *nv2atsd = SPAPR_PCI_NV2ATSD_WIN_BASE + index * SPAPR_PCI_NV2ATSD_WIN_SIZE;
 }
 
 static ICSState *spapr_ics_get(XICSFabric *dev, int irq)
@@ -4295,7 +4327,8 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
     vhc->hpt_mask = spapr_hpt_mask;
     vhc->map_hptes = spapr_map_hptes;
     vhc->unmap_hptes = spapr_unmap_hptes;
-    vhc->store_hpte = spapr_store_hpte;
+    vhc->hpte_set_c = spapr_hpte_set_c;
+    vhc->hpte_set_r = spapr_hpte_set_r;
     vhc->get_pate = spapr_get_pate;
     vhc->encode_hpt_for_kvm_pr = spapr_encode_hpt_for_kvm_pr;
     xic->ics_get = spapr_ics_get;
@@ -4319,7 +4352,7 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
     smc->default_caps.caps[SPAPR_CAP_LARGE_DECREMENTER] = SPAPR_CAP_ON;
     smc->default_caps.caps[SPAPR_CAP_CCF_ASSIST] = SPAPR_CAP_OFF;
     spapr_caps_add_properties(smc, &error_abort);
-    smc->irq = &spapr_irq_xics;
+    smc->irq = &spapr_irq_dual;
     smc->dr_phb_enabled = true;
 }
 
@@ -4366,14 +4399,42 @@ static const TypeInfo spapr_machine_info = {
     type_init(spapr_machine_register_##suffix)
 
 /*
- * pseries-4.0
+ * pseries-4.1
  */
-static void spapr_machine_4_0_class_options(MachineClass *mc)
+static void spapr_machine_4_1_class_options(MachineClass *mc)
 {
     /* Defaults for the latest behaviour inherited from the base class */
 }
 
-DEFINE_SPAPR_MACHINE(4_0, "4.0", true);
+DEFINE_SPAPR_MACHINE(4_1, "4.1", true);
+
+/*
+ * pseries-4.0
+ */
+static void phb_placement_4_0(SpaprMachineState *spapr, uint32_t index,
+                              uint64_t *buid, hwaddr *pio,
+                              hwaddr *mmio32, hwaddr *mmio64,
+                              unsigned n_dma, uint32_t *liobns,
+                              hwaddr *nv2gpa, hwaddr *nv2atsd, Error **errp)
+{
+    spapr_phb_placement(spapr, index, buid, pio, mmio32, mmio64, n_dma, liobns,
+                        nv2gpa, nv2atsd, errp);
+    *nv2gpa = 0;
+    *nv2atsd = 0;
+}
+
+static void spapr_machine_4_0_class_options(MachineClass *mc)
+{
+    SpaprMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_4_1_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_4_0, hw_compat_4_0_len);
+    smc->phb_placement = phb_placement_4_0;
+    smc->irq = &spapr_irq_xics;
+    smc->pre_4_1_migration = true;
+}
+
+DEFINE_SPAPR_MACHINE(4_0, "4.0", false);
 
 /*
  * pseries-3.1
@@ -4381,18 +4442,14 @@ DEFINE_SPAPR_MACHINE(4_0, "4.0", true);
 static void spapr_machine_3_1_class_options(MachineClass *mc)
 {
     SpaprMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
-    static GlobalProperty compat[] = {
-        { TYPE_SPAPR_MACHINE, "host-model", "passthrough" },
-        { TYPE_SPAPR_MACHINE, "host-serial", "passthrough" },
-    };
 
     spapr_machine_4_0_class_options(mc);
     compat_props_add(mc->compat_props, hw_compat_3_1, hw_compat_3_1_len);
-    compat_props_add(mc->compat_props, compat, G_N_ELEMENTS(compat));
 
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("power8_v2.0");
     smc->update_dt_enabled = false;
     smc->dr_phb_enabled = false;
+    smc->broken_host_serial_model = true;
     smc->default_caps.caps[SPAPR_CAP_CFPC] = SPAPR_CAP_BROKEN;
     smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_BROKEN;
     smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_BROKEN;
@@ -4528,7 +4585,8 @@ DEFINE_SPAPR_MACHINE(2_8, "2.8", false);
 static void phb_placement_2_7(SpaprMachineState *spapr, uint32_t index,
                               uint64_t *buid, hwaddr *pio,
                               hwaddr *mmio32, hwaddr *mmio64,
-                              unsigned n_dma, uint32_t *liobns, Error **errp)
+                              unsigned n_dma, uint32_t *liobns,
+                              hwaddr *nv2gpa, hwaddr *nv2atsd, Error **errp)
 {
     /* Legacy PHB placement for pseries-2.7 and earlier machine types */
     const uint64_t base_buid = 0x800000020000000ULL;
@@ -4572,6 +4630,9 @@ static void phb_placement_2_7(SpaprMachineState *spapr, uint32_t index,
      * fallback behaviour of automatically splitting a large "32-bit"
      * window into contiguous 32-bit and 64-bit windows
      */
+
+    *nv2gpa = 0;
+    *nv2atsd = 0;
 }
 
 static void spapr_machine_2_7_class_options(MachineClass *mc)

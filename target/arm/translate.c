@@ -28,8 +28,9 @@
 #include "tcg-op-gvec.h"
 #include "qemu/log.h"
 #include "qemu/bitops.h"
+#include "qemu/qemu-print.h"
 #include "arm_ldst.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -601,16 +602,6 @@ static void gen_sar(TCGv_i32 dest, TCGv_i32 t0, TCGv_i32 t1)
     tcg_temp_free_i32(tmp2);
     tcg_gen_sar_i32(dest, t0, tmp1);
     tcg_temp_free_i32(tmp1);
-}
-
-static void tcg_gen_abs_i32(TCGv_i32 dest, TCGv_i32 src)
-{
-    TCGv_i32 c0 = tcg_const_i32(0);
-    TCGv_i32 tmp = tcg_temp_new_i32();
-    tcg_gen_neg_i32(tmp, src);
-    tcg_gen_movcond_i32(TCG_COND_GT, dest, src, c0, src, tmp);
-    tcg_temp_free_i32(c0);
-    tcg_temp_free_i32(tmp);
 }
 
 static void shifter_out_im(TCGv_i32 var, int shift)
@@ -3398,8 +3389,14 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
      * for attempts to execute invalid vfp/neon encodings with FP disabled.
      */
     if (s->fp_excp_el) {
-        gen_exception_insn(s, 4, EXCP_UDEF,
-                           syn_fp_access_trap(1, 0xe, false), s->fp_excp_el);
+        if (arm_dc_feature(s, ARM_FEATURE_M)) {
+            gen_exception_insn(s, 4, EXCP_NOCP, syn_uncategorized(),
+                               s->fp_excp_el);
+        } else {
+            gen_exception_insn(s, 4, EXCP_UDEF,
+                               syn_fp_access_trap(1, 0xe, false),
+                               s->fp_excp_el);
+        }
         return 0;
     }
 
@@ -3411,6 +3408,73 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
         if (rn != ARM_VFP_FPSID && rn != ARM_VFP_FPEXC && rn != ARM_VFP_MVFR2
             && rn != ARM_VFP_MVFR1 && rn != ARM_VFP_MVFR0) {
             return 1;
+        }
+    }
+
+    if (arm_dc_feature(s, ARM_FEATURE_M)) {
+        /* Handle M-profile lazy FP state mechanics */
+
+        /* Trigger lazy-state preservation if necessary */
+        if (s->v7m_lspact) {
+            /*
+             * Lazy state saving affects external memory and also the NVIC,
+             * so we must mark it as an IO operation for icount.
+             */
+            if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+                gen_io_start();
+            }
+            gen_helper_v7m_preserve_fp_state(cpu_env);
+            if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+                gen_io_end();
+            }
+            /*
+             * If the preserve_fp_state helper doesn't throw an exception
+             * then it will clear LSPACT; we don't need to repeat this for
+             * any further FP insns in this TB.
+             */
+            s->v7m_lspact = false;
+        }
+
+        /* Update ownership of FP context: set FPCCR.S to match current state */
+        if (s->v8m_fpccr_s_wrong) {
+            TCGv_i32 tmp;
+
+            tmp = load_cpu_field(v7m.fpccr[M_REG_S]);
+            if (s->v8m_secure) {
+                tcg_gen_ori_i32(tmp, tmp, R_V7M_FPCCR_S_MASK);
+            } else {
+                tcg_gen_andi_i32(tmp, tmp, ~R_V7M_FPCCR_S_MASK);
+            }
+            store_cpu_field(tmp, v7m.fpccr[M_REG_S]);
+            /* Don't need to do this for any further FP insns in this TB */
+            s->v8m_fpccr_s_wrong = false;
+        }
+
+        if (s->v7m_new_fp_ctxt_needed) {
+            /*
+             * Create new FP context by updating CONTROL.FPCA, CONTROL.SFPA
+             * and the FPSCR.
+             */
+            TCGv_i32 control, fpscr;
+            uint32_t bits = R_V7M_CONTROL_FPCA_MASK;
+
+            fpscr = load_cpu_field(v7m.fpdscr[s->v8m_secure]);
+            gen_helper_vfp_set_fpscr(cpu_env, fpscr);
+            tcg_temp_free_i32(fpscr);
+            /*
+             * We don't need to arrange to end the TB, because the only
+             * parts of FPSCR which we cache in the TB flags are the VECLEN
+             * and VECSTRIDE, and those don't exist for M-profile.
+             */
+
+            if (s->v8m_secure) {
+                bits |= R_V7M_CONTROL_SFPA_MASK;
+            }
+            control = load_cpu_field(v7m.control[M_REG_S]);
+            tcg_gen_ori_i32(control, control, bits);
+            store_cpu_field(control, v7m.control[M_REG_S]);
+            /* Don't need to do this for any further FP insns in this TB */
+            s->v7m_new_fp_ctxt_needed = false;
         }
     }
 
@@ -3512,12 +3576,27 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
                     }
                 }
             } else { /* !dp */
+                bool is_sysreg;
+
                 if ((insn & 0x6f) != 0x00)
                     return 1;
                 rn = VFP_SREG_N(insn);
+
+                is_sysreg = extract32(insn, 21, 1);
+
+                if (arm_dc_feature(s, ARM_FEATURE_M)) {
+                    /*
+                     * The only M-profile VFP vmrs/vmsr sysreg is FPSCR.
+                     * Writes to R15 are UNPREDICTABLE; we choose to undef.
+                     */
+                    if (is_sysreg && (rd == 15 || (rn >> 1) != ARM_VFP_FPSCR)) {
+                        return 1;
+                    }
+                }
+
                 if (insn & ARM_CP_RW_BIT) {
                     /* vfp->arm */
-                    if (insn & (1 << 21)) {
+                    if (is_sysreg) {
                         /* system register */
                         rn >>= 1;
 
@@ -3584,7 +3663,7 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
                     }
                 } else {
                     /* arm->vfp */
-                    if (insn & (1 << 21)) {
+                    if (is_sysreg) {
                         rn >>= 1;
                         /* system register */
                         switch (rn) {
@@ -5772,27 +5851,31 @@ static void gen_ssra_vec(unsigned vece, TCGv_vec d, TCGv_vec a, int64_t sh)
     tcg_gen_add_vec(vece, d, d, a);
 }
 
+static const TCGOpcode vecop_list_ssra[] = {
+    INDEX_op_sari_vec, INDEX_op_add_vec, 0
+};
+
 const GVecGen2i ssra_op[4] = {
     { .fni8 = gen_ssra8_i64,
       .fniv = gen_ssra_vec,
       .load_dest = true,
-      .opc = INDEX_op_sari_vec,
+      .opt_opc = vecop_list_ssra,
       .vece = MO_8 },
     { .fni8 = gen_ssra16_i64,
       .fniv = gen_ssra_vec,
       .load_dest = true,
-      .opc = INDEX_op_sari_vec,
+      .opt_opc = vecop_list_ssra,
       .vece = MO_16 },
     { .fni4 = gen_ssra32_i32,
       .fniv = gen_ssra_vec,
       .load_dest = true,
-      .opc = INDEX_op_sari_vec,
+      .opt_opc = vecop_list_ssra,
       .vece = MO_32 },
     { .fni8 = gen_ssra64_i64,
       .fniv = gen_ssra_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+      .opt_opc = vecop_list_ssra,
       .load_dest = true,
-      .opc = INDEX_op_sari_vec,
       .vece = MO_64 },
 };
 
@@ -5826,27 +5909,31 @@ static void gen_usra_vec(unsigned vece, TCGv_vec d, TCGv_vec a, int64_t sh)
     tcg_gen_add_vec(vece, d, d, a);
 }
 
+static const TCGOpcode vecop_list_usra[] = {
+    INDEX_op_shri_vec, INDEX_op_add_vec, 0
+};
+
 const GVecGen2i usra_op[4] = {
     { .fni8 = gen_usra8_i64,
       .fniv = gen_usra_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_usra,
       .vece = MO_8, },
     { .fni8 = gen_usra16_i64,
       .fniv = gen_usra_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_usra,
       .vece = MO_16, },
     { .fni4 = gen_usra32_i32,
       .fniv = gen_usra_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_usra,
       .vece = MO_32, },
     { .fni8 = gen_usra64_i64,
       .fniv = gen_usra_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_usra,
       .vece = MO_64, },
 };
 
@@ -5904,27 +5991,29 @@ static void gen_shr_ins_vec(unsigned vece, TCGv_vec d, TCGv_vec a, int64_t sh)
     }
 }
 
+static const TCGOpcode vecop_list_sri[] = { INDEX_op_shri_vec, 0 };
+
 const GVecGen2i sri_op[4] = {
     { .fni8 = gen_shr8_ins_i64,
       .fniv = gen_shr_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_sri,
       .vece = MO_8 },
     { .fni8 = gen_shr16_ins_i64,
       .fniv = gen_shr_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_sri,
       .vece = MO_16 },
     { .fni4 = gen_shr32_ins_i32,
       .fniv = gen_shr_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_sri,
       .vece = MO_32 },
     { .fni8 = gen_shr64_ins_i64,
       .fniv = gen_shr_ins_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
       .load_dest = true,
-      .opc = INDEX_op_shri_vec,
+      .opt_opc = vecop_list_sri,
       .vece = MO_64 },
 };
 
@@ -5980,27 +6069,29 @@ static void gen_shl_ins_vec(unsigned vece, TCGv_vec d, TCGv_vec a, int64_t sh)
     }
 }
 
+static const TCGOpcode vecop_list_sli[] = { INDEX_op_shli_vec, 0 };
+
 const GVecGen2i sli_op[4] = {
     { .fni8 = gen_shl8_ins_i64,
       .fniv = gen_shl_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shli_vec,
+      .opt_opc = vecop_list_sli,
       .vece = MO_8 },
     { .fni8 = gen_shl16_ins_i64,
       .fniv = gen_shl_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shli_vec,
+      .opt_opc = vecop_list_sli,
       .vece = MO_16 },
     { .fni4 = gen_shl32_ins_i32,
       .fniv = gen_shl_ins_vec,
       .load_dest = true,
-      .opc = INDEX_op_shli_vec,
+      .opt_opc = vecop_list_sli,
       .vece = MO_32 },
     { .fni8 = gen_shl64_ins_i64,
       .fniv = gen_shl_ins_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
       .load_dest = true,
-      .opc = INDEX_op_shli_vec,
+      .opt_opc = vecop_list_sli,
       .vece = MO_64 },
 };
 
@@ -6067,51 +6158,60 @@ static void gen_mls_vec(unsigned vece, TCGv_vec d, TCGv_vec a, TCGv_vec b)
 /* Note that while NEON does not support VMLA and VMLS as 64-bit ops,
  * these tables are shared with AArch64 which does support them.
  */
+
+static const TCGOpcode vecop_list_mla[] = {
+    INDEX_op_mul_vec, INDEX_op_add_vec, 0
+};
+
+static const TCGOpcode vecop_list_mls[] = {
+    INDEX_op_mul_vec, INDEX_op_sub_vec, 0
+};
+
 const GVecGen3 mla_op[4] = {
     { .fni4 = gen_mla8_i32,
       .fniv = gen_mla_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mla,
       .vece = MO_8 },
     { .fni4 = gen_mla16_i32,
       .fniv = gen_mla_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mla,
       .vece = MO_16 },
     { .fni4 = gen_mla32_i32,
       .fniv = gen_mla_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mla,
       .vece = MO_32 },
     { .fni8 = gen_mla64_i64,
       .fniv = gen_mla_vec,
-      .opc = INDEX_op_mul_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
       .load_dest = true,
+      .opt_opc = vecop_list_mla,
       .vece = MO_64 },
 };
 
 const GVecGen3 mls_op[4] = {
     { .fni4 = gen_mls8_i32,
       .fniv = gen_mls_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mls,
       .vece = MO_8 },
     { .fni4 = gen_mls16_i32,
       .fniv = gen_mls_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mls,
       .vece = MO_16 },
     { .fni4 = gen_mls32_i32,
       .fniv = gen_mls_vec,
-      .opc = INDEX_op_mul_vec,
       .load_dest = true,
+      .opt_opc = vecop_list_mls,
       .vece = MO_32 },
     { .fni8 = gen_mls64_i64,
       .fniv = gen_mls_vec,
-      .opc = INDEX_op_mul_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
       .load_dest = true,
+      .opt_opc = vecop_list_mls,
       .vece = MO_64 },
 };
 
@@ -6137,19 +6237,25 @@ static void gen_cmtst_vec(unsigned vece, TCGv_vec d, TCGv_vec a, TCGv_vec b)
     tcg_gen_cmp_vec(TCG_COND_NE, vece, d, d, a);
 }
 
+static const TCGOpcode vecop_list_cmtst[] = { INDEX_op_cmp_vec, 0 };
+
 const GVecGen3 cmtst_op[4] = {
     { .fni4 = gen_helper_neon_tst_u8,
       .fniv = gen_cmtst_vec,
+      .opt_opc = vecop_list_cmtst,
       .vece = MO_8 },
     { .fni4 = gen_helper_neon_tst_u16,
       .fniv = gen_cmtst_vec,
+      .opt_opc = vecop_list_cmtst,
       .vece = MO_16 },
     { .fni4 = gen_cmtst_i32,
       .fniv = gen_cmtst_vec,
+      .opt_opc = vecop_list_cmtst,
       .vece = MO_32 },
     { .fni8 = gen_cmtst_i64,
       .fniv = gen_cmtst_vec,
       .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+      .opt_opc = vecop_list_cmtst,
       .vece = MO_64 },
 };
 
@@ -6164,26 +6270,30 @@ static void gen_uqadd_vec(unsigned vece, TCGv_vec t, TCGv_vec sat,
     tcg_temp_free_vec(x);
 }
 
+static const TCGOpcode vecop_list_uqadd[] = {
+    INDEX_op_usadd_vec, INDEX_op_cmp_vec, INDEX_op_add_vec, 0
+};
+
 const GVecGen4 uqadd_op[4] = {
     { .fniv = gen_uqadd_vec,
       .fno = gen_helper_gvec_uqadd_b,
-      .opc = INDEX_op_usadd_vec,
       .write_aofs = true,
+      .opt_opc = vecop_list_uqadd,
       .vece = MO_8 },
     { .fniv = gen_uqadd_vec,
       .fno = gen_helper_gvec_uqadd_h,
-      .opc = INDEX_op_usadd_vec,
       .write_aofs = true,
+      .opt_opc = vecop_list_uqadd,
       .vece = MO_16 },
     { .fniv = gen_uqadd_vec,
       .fno = gen_helper_gvec_uqadd_s,
-      .opc = INDEX_op_usadd_vec,
       .write_aofs = true,
+      .opt_opc = vecop_list_uqadd,
       .vece = MO_32 },
     { .fniv = gen_uqadd_vec,
       .fno = gen_helper_gvec_uqadd_d,
-      .opc = INDEX_op_usadd_vec,
       .write_aofs = true,
+      .opt_opc = vecop_list_uqadd,
       .vece = MO_64 },
 };
 
@@ -6198,25 +6308,29 @@ static void gen_sqadd_vec(unsigned vece, TCGv_vec t, TCGv_vec sat,
     tcg_temp_free_vec(x);
 }
 
+static const TCGOpcode vecop_list_sqadd[] = {
+    INDEX_op_ssadd_vec, INDEX_op_cmp_vec, INDEX_op_add_vec, 0
+};
+
 const GVecGen4 sqadd_op[4] = {
     { .fniv = gen_sqadd_vec,
       .fno = gen_helper_gvec_sqadd_b,
-      .opc = INDEX_op_ssadd_vec,
+      .opt_opc = vecop_list_sqadd,
       .write_aofs = true,
       .vece = MO_8 },
     { .fniv = gen_sqadd_vec,
       .fno = gen_helper_gvec_sqadd_h,
-      .opc = INDEX_op_ssadd_vec,
+      .opt_opc = vecop_list_sqadd,
       .write_aofs = true,
       .vece = MO_16 },
     { .fniv = gen_sqadd_vec,
       .fno = gen_helper_gvec_sqadd_s,
-      .opc = INDEX_op_ssadd_vec,
+      .opt_opc = vecop_list_sqadd,
       .write_aofs = true,
       .vece = MO_32 },
     { .fniv = gen_sqadd_vec,
       .fno = gen_helper_gvec_sqadd_d,
-      .opc = INDEX_op_ssadd_vec,
+      .opt_opc = vecop_list_sqadd,
       .write_aofs = true,
       .vece = MO_64 },
 };
@@ -6232,25 +6346,29 @@ static void gen_uqsub_vec(unsigned vece, TCGv_vec t, TCGv_vec sat,
     tcg_temp_free_vec(x);
 }
 
+static const TCGOpcode vecop_list_uqsub[] = {
+    INDEX_op_ussub_vec, INDEX_op_cmp_vec, INDEX_op_sub_vec, 0
+};
+
 const GVecGen4 uqsub_op[4] = {
     { .fniv = gen_uqsub_vec,
       .fno = gen_helper_gvec_uqsub_b,
-      .opc = INDEX_op_ussub_vec,
+      .opt_opc = vecop_list_uqsub,
       .write_aofs = true,
       .vece = MO_8 },
     { .fniv = gen_uqsub_vec,
       .fno = gen_helper_gvec_uqsub_h,
-      .opc = INDEX_op_ussub_vec,
+      .opt_opc = vecop_list_uqsub,
       .write_aofs = true,
       .vece = MO_16 },
     { .fniv = gen_uqsub_vec,
       .fno = gen_helper_gvec_uqsub_s,
-      .opc = INDEX_op_ussub_vec,
+      .opt_opc = vecop_list_uqsub,
       .write_aofs = true,
       .vece = MO_32 },
     { .fniv = gen_uqsub_vec,
       .fno = gen_helper_gvec_uqsub_d,
-      .opc = INDEX_op_ussub_vec,
+      .opt_opc = vecop_list_uqsub,
       .write_aofs = true,
       .vece = MO_64 },
 };
@@ -6266,25 +6384,29 @@ static void gen_sqsub_vec(unsigned vece, TCGv_vec t, TCGv_vec sat,
     tcg_temp_free_vec(x);
 }
 
+static const TCGOpcode vecop_list_sqsub[] = {
+    INDEX_op_sssub_vec, INDEX_op_cmp_vec, INDEX_op_sub_vec, 0
+};
+
 const GVecGen4 sqsub_op[4] = {
     { .fniv = gen_sqsub_vec,
       .fno = gen_helper_gvec_sqsub_b,
-      .opc = INDEX_op_sssub_vec,
+      .opt_opc = vecop_list_sqsub,
       .write_aofs = true,
       .vece = MO_8 },
     { .fniv = gen_sqsub_vec,
       .fno = gen_helper_gvec_sqsub_h,
-      .opc = INDEX_op_sssub_vec,
+      .opt_opc = vecop_list_sqsub,
       .write_aofs = true,
       .vece = MO_16 },
     { .fniv = gen_sqsub_vec,
       .fno = gen_helper_gvec_sqsub_s,
-      .opc = INDEX_op_sssub_vec,
+      .opt_opc = vecop_list_sqsub,
       .write_aofs = true,
       .vece = MO_32 },
     { .fniv = gen_sqsub_vec,
       .fno = gen_helper_gvec_sqsub_d,
-      .opc = INDEX_op_sssub_vec,
+      .opt_opc = vecop_list_sqsub,
       .write_aofs = true,
       .vece = MO_64 },
 };
@@ -6476,13 +6598,13 @@ static int disas_neon_data_insn(DisasContext *s, uint32_t insn)
             tcg_gen_gvec_4(rd_ofs, offsetof(CPUARMState, vfp.qc),
                            rn_ofs, rm_ofs, vec_size, vec_size,
                            (u ? uqadd_op : sqadd_op) + size);
-            break;
+            return 0;
 
         case NEON_3R_VQSUB:
             tcg_gen_gvec_4(rd_ofs, offsetof(CPUARMState, vfp.qc),
                            rn_ofs, rm_ofs, vec_size, vec_size,
                            (u ? uqsub_op : sqsub_op) + size);
-            break;
+            return 0;
 
         case NEON_3R_VMUL: /* VMUL */
             if (u) {
@@ -7998,6 +8120,9 @@ static int disas_neon_data_insn(DisasContext *s, uint32_t insn)
                 case NEON_2RM_VNEG:
                     tcg_gen_gvec_neg(size, rd_ofs, rm_ofs, vec_size, vec_size);
                     break;
+                case NEON_2RM_VABS:
+                    tcg_gen_gvec_abs(size, rd_ofs, rm_ofs, vec_size, vec_size);
+                    break;
 
                 default:
                 elementwise:
@@ -8102,14 +8227,6 @@ static int disas_neon_data_insn(DisasContext *s, uint32_t insn)
                             default: abort();
                             }
                             tcg_temp_free_i32(tmp2);
-                            break;
-                        case NEON_2RM_VABS:
-                            switch(size) {
-                            case 0: gen_helper_neon_abs_s8(tmp, tmp); break;
-                            case 1: gen_helper_neon_abs_s16(tmp, tmp); break;
-                            case 2: tcg_gen_abs_i32(tmp, tmp); break;
-                            default: abort();
-                            }
                             break;
                         case NEON_2RM_VCGT0_F:
                         {
@@ -11706,10 +11823,19 @@ static void disas_thumb2_insn(DisasContext *s, uint32_t insn)
     case 6: case 7: case 14: case 15:
         /* Coprocessor.  */
         if (arm_dc_feature(s, ARM_FEATURE_M)) {
-            /* We don't currently implement M profile FP support,
-             * so this entire space should give a NOCP fault, with
-             * the exception of the v8M VLLDM and VLSTM insns, which
-             * must be NOPs in Secure state and UNDEF in Nonsecure state.
+            /* 0b111x_11xx_xxxx_xxxx_xxxx_xxxx_xxxx_xxxx */
+            if (extract32(insn, 24, 2) == 3) {
+                goto illegal_op; /* op0 = 0b11 : unallocated */
+            }
+
+            /*
+             * Decode VLLDM and VLSTM first: these are nonstandard because:
+             *  * if there is no FPU then these insns must NOP in
+             *    Secure state and UNDEF in Nonsecure state
+             *  * if there is an FPU then these insns do not have
+             *    the usual behaviour that disas_vfp_insn() provides of
+             *    being controlled by CPACR/NSACR enable bits or the
+             *    lazy-stacking logic.
              */
             if (arm_dc_feature(s, ARM_FEATURE_V8) &&
                 (insn & 0xffa00f00) == 0xec200a00) {
@@ -11720,9 +11846,31 @@ static void disas_thumb2_insn(DisasContext *s, uint32_t insn)
                 if (!s->v8m_secure || (insn & 0x0040f0ff)) {
                     goto illegal_op;
                 }
-                /* Just NOP since FP support is not implemented */
+
+                if (arm_dc_feature(s, ARM_FEATURE_VFP)) {
+                    TCGv_i32 fptr = load_reg(s, rn);
+
+                    if (extract32(insn, 20, 1)) {
+                        gen_helper_v7m_vlldm(cpu_env, fptr);
+                    } else {
+                        gen_helper_v7m_vlstm(cpu_env, fptr);
+                    }
+                    tcg_temp_free_i32(fptr);
+
+                    /* End the TB, because we have updated FP control bits */
+                    s->base.is_jmp = DISAS_UPDATE;
+                }
                 break;
             }
+            if (arm_dc_feature(s, ARM_FEATURE_VFP) &&
+                ((insn >> 8) & 0xe) == 10) {
+                /* FP, and the CPU supports it */
+                if (disas_vfp_insn(s, insn)) {
+                    goto illegal_op;
+                }
+                break;
+            }
+
             /* All other insns: NOCP */
             gen_exception_insn(s, 4, EXCP_NOCP, syn_uncategorized(),
                                default_exception_el(s));
@@ -13290,12 +13438,21 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     dc->fp_excp_el = FIELD_EX32(tb_flags, TBFLAG_ANY, FPEXC_EL);
     dc->vfp_enabled = FIELD_EX32(tb_flags, TBFLAG_A32, VFPEN);
     dc->vec_len = FIELD_EX32(tb_flags, TBFLAG_A32, VECLEN);
-    dc->vec_stride = FIELD_EX32(tb_flags, TBFLAG_A32, VECSTRIDE);
-    dc->c15_cpar = FIELD_EX32(tb_flags, TBFLAG_A32, XSCALE_CPAR);
+    if (arm_feature(env, ARM_FEATURE_XSCALE)) {
+        dc->c15_cpar = FIELD_EX32(tb_flags, TBFLAG_A32, XSCALE_CPAR);
+        dc->vec_stride = 0;
+    } else {
+        dc->vec_stride = FIELD_EX32(tb_flags, TBFLAG_A32, VECSTRIDE);
+        dc->c15_cpar = 0;
+    }
     dc->v7m_handler_mode = FIELD_EX32(tb_flags, TBFLAG_A32, HANDLER);
     dc->v8m_secure = arm_feature(env, ARM_FEATURE_M_SECURITY) &&
         regime_is_secure(env, dc->mmu_idx);
     dc->v8m_stackcheck = FIELD_EX32(tb_flags, TBFLAG_A32, STACKCHECK);
+    dc->v8m_fpccr_s_wrong = FIELD_EX32(tb_flags, TBFLAG_A32, FPCCR_S_WRONG);
+    dc->v7m_new_fp_ctxt_needed =
+        FIELD_EX32(tb_flags, TBFLAG_A32, NEW_FP_CTXT_NEEDED);
+    dc->v7m_lspact = FIELD_EX32(tb_flags, TBFLAG_A32, LSPACT);
     dc->cp_regs = cpu->cp_regs;
     dc->features = env->features;
 
@@ -13755,7 +13912,7 @@ static const TranslatorOps thumb_translator_ops = {
 };
 
 /* generate intermediate code for basic block 'tb'.  */
-void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb)
+void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns)
 {
     DisasContext dc;
     const TranslatorOps *ops = &arm_translator_ops;
@@ -13769,27 +13926,26 @@ void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb)
     }
 #endif
 
-    translator_loop(ops, &dc.base, cpu, tb);
+    translator_loop(ops, &dc.base, cpu, tb, max_insns);
 }
 
-void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                        int flags)
+void arm_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
     int i;
 
     if (is_a64(env)) {
-        aarch64_cpu_dump_state(cs, f, cpu_fprintf, flags);
+        aarch64_cpu_dump_state(cs, f, flags);
         return;
     }
 
     for(i=0;i<16;i++) {
-        cpu_fprintf(f, "R%02d=%08x", i, env->regs[i]);
+        qemu_fprintf(f, "R%02d=%08x", i, env->regs[i]);
         if ((i % 4) == 3)
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         else
-            cpu_fprintf(f, " ");
+            qemu_fprintf(f, " ");
     }
 
     if (arm_feature(env, ARM_FEATURE_M)) {
@@ -13811,15 +13967,15 @@ void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
             }
         }
 
-        cpu_fprintf(f, "XPSR=%08x %c%c%c%c %c %s%s\n",
-                    xpsr,
-                    xpsr & XPSR_N ? 'N' : '-',
-                    xpsr & XPSR_Z ? 'Z' : '-',
-                    xpsr & XPSR_C ? 'C' : '-',
-                    xpsr & XPSR_V ? 'V' : '-',
-                    xpsr & XPSR_T ? 'T' : 'A',
-                    ns_status,
-                    mode);
+        qemu_fprintf(f, "XPSR=%08x %c%c%c%c %c %s%s\n",
+                     xpsr,
+                     xpsr & XPSR_N ? 'N' : '-',
+                     xpsr & XPSR_Z ? 'Z' : '-',
+                     xpsr & XPSR_C ? 'C' : '-',
+                     xpsr & XPSR_V ? 'V' : '-',
+                     xpsr & XPSR_T ? 'T' : 'A',
+                     ns_status,
+                     mode);
     } else {
         uint32_t psr = cpsr_read(env);
         const char *ns_status = "";
@@ -13829,15 +13985,15 @@ void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
             ns_status = env->cp15.scr_el3 & SCR_NS ? "NS " : "S ";
         }
 
-        cpu_fprintf(f, "PSR=%08x %c%c%c%c %c %s%s%d\n",
-                    psr,
-                    psr & CPSR_N ? 'N' : '-',
-                    psr & CPSR_Z ? 'Z' : '-',
-                    psr & CPSR_C ? 'C' : '-',
-                    psr & CPSR_V ? 'V' : '-',
-                    psr & CPSR_T ? 'T' : 'A',
-                    ns_status,
-                    aarch32_mode_name(psr), (psr & 0x10) ? 32 : 26);
+        qemu_fprintf(f, "PSR=%08x %c%c%c%c %c %s%s%d\n",
+                     psr,
+                     psr & CPSR_N ? 'N' : '-',
+                     psr & CPSR_Z ? 'Z' : '-',
+                     psr & CPSR_C ? 'C' : '-',
+                     psr & CPSR_V ? 'V' : '-',
+                     psr & CPSR_T ? 'T' : 'A',
+                     ns_status,
+                     aarch32_mode_name(psr), (psr & 0x10) ? 32 : 26);
     }
 
     if (flags & CPU_DUMP_FPU) {
@@ -13850,12 +14006,12 @@ void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
         }
         for (i = 0; i < numvfpregs; i++) {
             uint64_t v = *aa32_vfp_dreg(env, i);
-            cpu_fprintf(f, "s%02d=%08x s%02d=%08x d%02d=%016" PRIx64 "\n",
-                        i * 2, (uint32_t)v,
-                        i * 2 + 1, (uint32_t)(v >> 32),
-                        i, v);
+            qemu_fprintf(f, "s%02d=%08x s%02d=%08x d%02d=%016" PRIx64 "\n",
+                         i * 2, (uint32_t)v,
+                         i * 2 + 1, (uint32_t)(v >> 32),
+                         i, v);
         }
-        cpu_fprintf(f, "FPSCR: %08x\n", vfp_get_fpscr(env));
+        qemu_fprintf(f, "FPSCR: %08x\n", vfp_get_fpscr(env));
     }
 }
 

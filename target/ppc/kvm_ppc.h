@@ -60,6 +60,7 @@ bool kvmppc_has_cap_fixup_hcalls(void);
 bool kvmppc_has_cap_htm(void);
 bool kvmppc_has_cap_mmu_radix(void);
 bool kvmppc_has_cap_mmu_hash_v3(void);
+bool kvmppc_has_cap_xive(void);
 int kvmppc_get_cap_safe_cache(void);
 int kvmppc_get_cap_safe_bounds_check(void);
 int kvmppc_get_cap_safe_indirect_branch(void);
@@ -117,7 +118,8 @@ static inline int kvmppc_get_hasidle(CPUPPCState *env)
     return 0;
 }
 
-static inline int kvmppc_get_hypercall(CPUPPCState *env, uint8_t *buf, int buf_len)
+static inline int kvmppc_get_hypercall(CPUPPCState *env,
+                                       uint8_t *buf, int buf_len)
 {
     return -1;
 }
@@ -311,6 +313,11 @@ static inline bool kvmppc_has_cap_mmu_radix(void)
 }
 
 static inline bool kvmppc_has_cap_mmu_hash_v3(void)
+{
+    return false;
+}
+
+static inline bool kvmppc_has_cap_xive(void)
 {
     return false;
 }

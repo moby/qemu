@@ -32,12 +32,13 @@
 
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
 
 #include "target/mips/trace.h"
 #include "trace-tcg.h"
 #include "exec/translator.h"
 #include "exec/log.h"
+#include "qemu/qemu-print.h"
 
 #define MIPS_DEBUG_DISAS 0
 
@@ -13725,6 +13726,14 @@ static inline bool is_uhi(int sdbbp_code)
 #endif
 }
 
+#ifdef CONFIG_USER_ONLY
+/* The above should dead-code away any calls to this..*/
+static inline void gen_helper_do_semihosting(void *env)
+{
+    g_assert_not_reached();
+}
+#endif
+
 static int decode_mips16_opc (CPUMIPSState *env, DisasContext *ctx)
 {
     int rx, ry;
@@ -24348,6 +24357,146 @@ static void decode_opc_special(CPUMIPSState *env, DisasContext *ctx)
  *                     PEXTUW
  */
 
+/*
+ *  PCPYH rd, rt
+ *
+ *    Parallel Copy Halfword
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+---------+---------+---------+-----------+
+ *  |    MMI    |0 0 0 0 0|   rt    |   rd    |  PCPYH  |    MMI3   |
+ *  +-----------+---------+---------+---------+---------+-----------+
+ */
+static void gen_mmi_pcpyh(DisasContext *ctx)
+{
+    uint32_t pd, rt, rd;
+    uint32_t opcode;
+
+    opcode = ctx->opcode;
+
+    pd = extract32(opcode, 21, 5);
+    rt = extract32(opcode, 16, 5);
+    rd = extract32(opcode, 11, 5);
+
+    if (unlikely(pd != 0)) {
+        generate_exception_end(ctx, EXCP_RI);
+    } else if (rd == 0) {
+        /* nop */
+    } else if (rt == 0) {
+        tcg_gen_movi_i64(cpu_gpr[rd], 0);
+        tcg_gen_movi_i64(cpu_mmr[rd], 0);
+    } else {
+        TCGv_i64 t0 = tcg_temp_new();
+        TCGv_i64 t1 = tcg_temp_new();
+        uint64_t mask = (1ULL << 16) - 1;
+
+        tcg_gen_andi_i64(t0, cpu_gpr[rt], mask);
+        tcg_gen_movi_i64(t1, 0);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+
+        tcg_gen_mov_i64(cpu_gpr[rd], t1);
+
+        tcg_gen_andi_i64(t0, cpu_mmr[rt], mask);
+        tcg_gen_movi_i64(t1, 0);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+        tcg_gen_shli_i64(t0, t0, 16);
+        tcg_gen_or_i64(t1, t0, t1);
+
+        tcg_gen_mov_i64(cpu_mmr[rd], t1);
+
+        tcg_temp_free(t0);
+        tcg_temp_free(t1);
+    }
+}
+
+/*
+ *  PCPYLD rd, rs, rt
+ *
+ *    Parallel Copy Lower Doubleword
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+---------+---------+---------+-----------+
+ *  |    MMI    |   rs    |   rt    |   rd    | PCPYLD  |    MMI2   |
+ *  +-----------+---------+---------+---------+---------+-----------+
+ */
+static void gen_mmi_pcpyld(DisasContext *ctx)
+{
+    uint32_t rs, rt, rd;
+    uint32_t opcode;
+
+    opcode = ctx->opcode;
+
+    rs = extract32(opcode, 21, 5);
+    rt = extract32(opcode, 16, 5);
+    rd = extract32(opcode, 11, 5);
+
+    if (rd == 0) {
+        /* nop */
+    } else {
+        if (rs == 0) {
+            tcg_gen_movi_i64(cpu_mmr[rd], 0);
+        } else {
+            tcg_gen_mov_i64(cpu_mmr[rd], cpu_gpr[rs]);
+        }
+        if (rt == 0) {
+            tcg_gen_movi_i64(cpu_gpr[rd], 0);
+        } else {
+            if (rd != rt) {
+                tcg_gen_mov_i64(cpu_gpr[rd], cpu_gpr[rt]);
+            }
+        }
+    }
+}
+
+/*
+ *  PCPYUD rd, rs, rt
+ *
+ *    Parallel Copy Upper Doubleword
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+---------+---------+---------+-----------+
+ *  |    MMI    |   rs    |   rt    |   rd    | PCPYUD  |    MMI3   |
+ *  +-----------+---------+---------+---------+---------+-----------+
+ */
+static void gen_mmi_pcpyud(DisasContext *ctx)
+{
+    uint32_t rs, rt, rd;
+    uint32_t opcode;
+
+    opcode = ctx->opcode;
+
+    rs = extract32(opcode, 21, 5);
+    rt = extract32(opcode, 16, 5);
+    rd = extract32(opcode, 11, 5);
+
+    if (rd == 0) {
+        /* nop */
+    } else {
+        if (rs == 0) {
+            tcg_gen_movi_i64(cpu_gpr[rd], 0);
+        } else {
+            tcg_gen_mov_i64(cpu_gpr[rd], cpu_mmr[rs]);
+        }
+        if (rt == 0) {
+            tcg_gen_movi_i64(cpu_mmr[rd], 0);
+        } else {
+            if (rd != rt) {
+                tcg_gen_mov_i64(cpu_mmr[rd], cpu_mmr[rt]);
+            }
+        }
+    }
+}
+
 #endif
 
 
@@ -27362,7 +27511,6 @@ static void decode_mmi2(CPUMIPSState *env, DisasContext *ctx)
     case MMI_OPC_2_PINTH:     /* TODO: MMI_OPC_2_PINTH */
     case MMI_OPC_2_PMULTW:    /* TODO: MMI_OPC_2_PMULTW */
     case MMI_OPC_2_PDIVW:     /* TODO: MMI_OPC_2_PDIVW */
-    case MMI_OPC_2_PCPYLD:    /* TODO: MMI_OPC_2_PCPYLD */
     case MMI_OPC_2_PMADDH:    /* TODO: MMI_OPC_2_PMADDH */
     case MMI_OPC_2_PHMADH:    /* TODO: MMI_OPC_2_PHMADH */
     case MMI_OPC_2_PAND:      /* TODO: MMI_OPC_2_PAND */
@@ -27376,6 +27524,9 @@ static void decode_mmi2(CPUMIPSState *env, DisasContext *ctx)
     case MMI_OPC_2_PEXEW:     /* TODO: MMI_OPC_2_PEXEW */
     case MMI_OPC_2_PROT3W:    /* TODO: MMI_OPC_2_PROT3W */
         generate_exception_end(ctx, EXCP_RI); /* TODO: MMI_OPC_CLASS_MMI2 */
+        break;
+    case MMI_OPC_2_PCPYLD:
+        gen_mmi_pcpyld(ctx);
         break;
     default:
         MIPS_INVAL("TX79 MMI class MMI2");
@@ -27396,13 +27547,17 @@ static void decode_mmi3(CPUMIPSState *env, DisasContext *ctx)
     case MMI_OPC_3_PINTEH:     /* TODO: MMI_OPC_3_PINTEH */
     case MMI_OPC_3_PMULTUW:    /* TODO: MMI_OPC_3_PMULTUW */
     case MMI_OPC_3_PDIVUW:     /* TODO: MMI_OPC_3_PDIVUW */
-    case MMI_OPC_3_PCPYUD:     /* TODO: MMI_OPC_3_PCPYUD */
     case MMI_OPC_3_POR:        /* TODO: MMI_OPC_3_POR */
     case MMI_OPC_3_PNOR:       /* TODO: MMI_OPC_3_PNOR */
     case MMI_OPC_3_PEXCH:      /* TODO: MMI_OPC_3_PEXCH */
-    case MMI_OPC_3_PCPYH:      /* TODO: MMI_OPC_3_PCPYH */
     case MMI_OPC_3_PEXCW:      /* TODO: MMI_OPC_3_PEXCW */
         generate_exception_end(ctx, EXCP_RI); /* TODO: MMI_OPC_CLASS_MMI3 */
+        break;
+    case MMI_OPC_3_PCPYH:
+        gen_mmi_pcpyh(ctx);
+        break;
+    case MMI_OPC_3_PCPYUD:
+        gen_mmi_pcpyud(ctx);
         break;
     default:
         MIPS_INVAL("TX79 MMI class MMI3");
@@ -28296,20 +28451,73 @@ static void gen_msa_elm_df(CPUMIPSState *env, DisasContext *ctx, uint32_t df,
             generate_exception_end(ctx, EXCP_RI);
             break;
         }
+        if ((MASK_MSA_ELM(ctx->opcode) == OPC_COPY_U_df) &&
+              (df == DF_WORD)) {
+            generate_exception_end(ctx, EXCP_RI);
+            break;
+        }
 #endif
         switch (MASK_MSA_ELM(ctx->opcode)) {
         case OPC_COPY_S_df:
             if (likely(wd != 0)) {
-                gen_helper_msa_copy_s_df(cpu_env, tdf, twd, tws, tn);
+                switch (df) {
+                case DF_BYTE:
+                    gen_helper_msa_copy_s_b(cpu_env, twd, tws, tn);
+                    break;
+                case DF_HALF:
+                    gen_helper_msa_copy_s_h(cpu_env, twd, tws, tn);
+                    break;
+                case DF_WORD:
+                    gen_helper_msa_copy_s_w(cpu_env, twd, tws, tn);
+                    break;
+#if defined(TARGET_MIPS64)
+                case DF_DOUBLE:
+                    gen_helper_msa_copy_s_d(cpu_env, twd, tws, tn);
+                    break;
+#endif
+                default:
+                    assert(0);
+                }
             }
             break;
         case OPC_COPY_U_df:
             if (likely(wd != 0)) {
-                gen_helper_msa_copy_u_df(cpu_env, tdf, twd, tws, tn);
+                switch (df) {
+                case DF_BYTE:
+                    gen_helper_msa_copy_u_b(cpu_env, twd, tws, tn);
+                    break;
+                case DF_HALF:
+                    gen_helper_msa_copy_u_h(cpu_env, twd, tws, tn);
+                    break;
+#if defined(TARGET_MIPS64)
+                case DF_WORD:
+                    gen_helper_msa_copy_u_w(cpu_env, twd, tws, tn);
+                    break;
+#endif
+                default:
+                    assert(0);
+                }
             }
             break;
         case OPC_INSERT_df:
-            gen_helper_msa_insert_df(cpu_env, tdf, twd, tws, tn);
+            switch (df) {
+            case DF_BYTE:
+                gen_helper_msa_insert_b(cpu_env, twd, tws, tn);
+                break;
+            case DF_HALF:
+                gen_helper_msa_insert_h(cpu_env, twd, tws, tn);
+                break;
+            case DF_WORD:
+                gen_helper_msa_insert_w(cpu_env, twd, tws, tn);
+                break;
+#if defined(TARGET_MIPS64)
+            case DF_DOUBLE:
+                gen_helper_msa_insert_d(cpu_env, twd, tws, tn);
+                break;
+#endif
+            default:
+                assert(0);
+            }
             break;
         }
         break;
@@ -29720,15 +29928,14 @@ static const TranslatorOps mips_tr_ops = {
     .disas_log          = mips_tr_disas_log,
 };
 
-void gen_intermediate_code(CPUState *cs, struct TranslationBlock *tb)
+void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
 {
     DisasContext ctx;
 
-    translator_loop(&mips_tr_ops, &ctx.base, cs, tb);
+    translator_loop(&mips_tr_ops, &ctx.base, cs, tb, max_insns);
 }
 
-static void fpu_dump_state(CPUMIPSState *env, FILE *f, fprintf_function fpu_fprintf,
-                           int flags)
+static void fpu_dump_state(CPUMIPSState *env, FILE *f, int flags)
 {
     int i;
     int is_fpu64 = !!(env->hflags & MIPS_HFLAG_F64);
@@ -29736,68 +29943,69 @@ static void fpu_dump_state(CPUMIPSState *env, FILE *f, fprintf_function fpu_fpri
 #define printfpr(fp)                                                    \
     do {                                                                \
         if (is_fpu64)                                                   \
-            fpu_fprintf(f, "w:%08x d:%016" PRIx64                       \
-                        " fd:%13g fs:%13g psu: %13g\n",                 \
-                        (fp)->w[FP_ENDIAN_IDX], (fp)->d,                \
-                        (double)(fp)->fd,                               \
-                        (double)(fp)->fs[FP_ENDIAN_IDX],                \
-                        (double)(fp)->fs[!FP_ENDIAN_IDX]);              \
+            qemu_fprintf(f, "w:%08x d:%016" PRIx64                      \
+                         " fd:%13g fs:%13g psu: %13g\n",                \
+                         (fp)->w[FP_ENDIAN_IDX], (fp)->d,               \
+                         (double)(fp)->fd,                              \
+                         (double)(fp)->fs[FP_ENDIAN_IDX],               \
+                         (double)(fp)->fs[!FP_ENDIAN_IDX]);             \
         else {                                                          \
             fpr_t tmp;                                                  \
             tmp.w[FP_ENDIAN_IDX] = (fp)->w[FP_ENDIAN_IDX];              \
             tmp.w[!FP_ENDIAN_IDX] = ((fp) + 1)->w[FP_ENDIAN_IDX];       \
-            fpu_fprintf(f, "w:%08x d:%016" PRIx64                       \
-                        " fd:%13g fs:%13g psu:%13g\n",                  \
-                        tmp.w[FP_ENDIAN_IDX], tmp.d,                    \
-                        (double)tmp.fd,                                 \
-                        (double)tmp.fs[FP_ENDIAN_IDX],                  \
-                        (double)tmp.fs[!FP_ENDIAN_IDX]);                \
+            qemu_fprintf(f, "w:%08x d:%016" PRIx64                      \
+                         " fd:%13g fs:%13g psu:%13g\n",                 \
+                         tmp.w[FP_ENDIAN_IDX], tmp.d,                   \
+                         (double)tmp.fd,                                \
+                         (double)tmp.fs[FP_ENDIAN_IDX],                 \
+                         (double)tmp.fs[!FP_ENDIAN_IDX]);               \
         }                                                               \
     } while(0)
 
 
-    fpu_fprintf(f, "CP1 FCR0 0x%08x  FCR31 0x%08x  SR.FR %d  fp_status 0x%02x\n",
-                env->active_fpu.fcr0, env->active_fpu.fcr31, is_fpu64,
-                get_float_exception_flags(&env->active_fpu.fp_status));
+    qemu_fprintf(f,
+                 "CP1 FCR0 0x%08x  FCR31 0x%08x  SR.FR %d  fp_status 0x%02x\n",
+                 env->active_fpu.fcr0, env->active_fpu.fcr31, is_fpu64,
+                 get_float_exception_flags(&env->active_fpu.fp_status));
     for (i = 0; i < 32; (is_fpu64) ? i++ : (i += 2)) {
-        fpu_fprintf(f, "%3s: ", fregnames[i]);
+        qemu_fprintf(f, "%3s: ", fregnames[i]);
         printfpr(&env->active_fpu.fpr[i]);
     }
 
 #undef printfpr
 }
 
-void mips_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                         int flags)
+void mips_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     MIPSCPU *cpu = MIPS_CPU(cs);
     CPUMIPSState *env = &cpu->env;
     int i;
 
-    cpu_fprintf(f, "pc=0x" TARGET_FMT_lx " HI=0x" TARGET_FMT_lx
-                " LO=0x" TARGET_FMT_lx " ds %04x "
-                TARGET_FMT_lx " " TARGET_FMT_ld "\n",
-                env->active_tc.PC, env->active_tc.HI[0], env->active_tc.LO[0],
-                env->hflags, env->btarget, env->bcond);
+    qemu_fprintf(f, "pc=0x" TARGET_FMT_lx " HI=0x" TARGET_FMT_lx
+                 " LO=0x" TARGET_FMT_lx " ds %04x "
+                 TARGET_FMT_lx " " TARGET_FMT_ld "\n",
+                 env->active_tc.PC, env->active_tc.HI[0], env->active_tc.LO[0],
+                 env->hflags, env->btarget, env->bcond);
     for (i = 0; i < 32; i++) {
         if ((i & 3) == 0)
-            cpu_fprintf(f, "GPR%02d:", i);
-        cpu_fprintf(f, " %s " TARGET_FMT_lx, regnames[i], env->active_tc.gpr[i]);
+            qemu_fprintf(f, "GPR%02d:", i);
+        qemu_fprintf(f, " %s " TARGET_FMT_lx,
+                     regnames[i], env->active_tc.gpr[i]);
         if ((i & 3) == 3)
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
     }
 
-    cpu_fprintf(f, "CP0 Status  0x%08x Cause   0x%08x EPC    0x" TARGET_FMT_lx "\n",
-                env->CP0_Status, env->CP0_Cause, env->CP0_EPC);
-    cpu_fprintf(f, "    Config0 0x%08x Config1 0x%08x LLAddr 0x%016"
-                PRIx64 "\n",
-                env->CP0_Config0, env->CP0_Config1, env->CP0_LLAddr);
-    cpu_fprintf(f, "    Config2 0x%08x Config3 0x%08x\n",
-                env->CP0_Config2, env->CP0_Config3);
-    cpu_fprintf(f, "    Config4 0x%08x Config5 0x%08x\n",
-                env->CP0_Config4, env->CP0_Config5);
+    qemu_fprintf(f, "CP0 Status  0x%08x Cause   0x%08x EPC    0x" TARGET_FMT_lx "\n",
+                 env->CP0_Status, env->CP0_Cause, env->CP0_EPC);
+    qemu_fprintf(f, "    Config0 0x%08x Config1 0x%08x LLAddr 0x%016"
+                 PRIx64 "\n",
+                 env->CP0_Config0, env->CP0_Config1, env->CP0_LLAddr);
+    qemu_fprintf(f, "    Config2 0x%08x Config3 0x%08x\n",
+                 env->CP0_Config2, env->CP0_Config3);
+    qemu_fprintf(f, "    Config4 0x%08x Config5 0x%08x\n",
+                 env->CP0_Config4, env->CP0_Config5);
     if ((flags & CPU_DUMP_FPU) && (env->hflags & MIPS_HFLAG_FPU)) {
-        fpu_dump_state(env, f, cpu_fprintf, flags);
+        fpu_dump_state(env, f, flags);
     }
 }
 

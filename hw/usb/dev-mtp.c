@@ -170,7 +170,7 @@ struct MTPObject {
     char         *path;
     struct stat  stat;
     /* file monitor watch id */
-    int          watchid;
+    int64_t      watchid;
     MTPObject    *parent;
     uint32_t     nchildren;
     QLIST_HEAD(, MTPObject) children;
@@ -226,7 +226,7 @@ typedef struct {
     uint32_t assoc_desc;
     uint32_t seq_no; /*unused*/
     uint8_t length; /*part of filename field*/
-    uint16_t filename[0];
+    uint8_t filename[0]; /* UTF-16 encoded */
     char date_created[0]; /*unused*/
     char date_modified[0]; /*unused*/
     char keywords[0]; /*unused*/
@@ -498,7 +498,7 @@ static MTPObject *usb_mtp_object_lookup_name(MTPObject *parent,
     return NULL;
 }
 
-static MTPObject *usb_mtp_object_lookup_id(MTPState *s, int id)
+static MTPObject *usb_mtp_object_lookup_id(MTPState *s, int64_t id)
 {
     MTPObject *iter;
 
@@ -511,7 +511,7 @@ static MTPObject *usb_mtp_object_lookup_id(MTPState *s, int id)
     return NULL;
 }
 
-static void file_monitor_event(int id,
+static void file_monitor_event(int64_t id,
                                QFileMonitorEvent ev,
                                const char *name,
                                void *opaque)
@@ -625,8 +625,8 @@ static void usb_mtp_object_readdir(MTPState *s, MTPObject *o)
     }
 
     if (s->file_monitor) {
-        int id = qemu_file_monitor_add_watch(s->file_monitor, o->path, NULL,
-                                             file_monitor_event, s, &err);
+        int64_t id = qemu_file_monitor_add_watch(s->file_monitor, o->path, NULL,
+                                                 file_monitor_event, s, &err);
         if (id == -1) {
             error_report("usb-mtp: failed to add watch for %s: %s", o->path,
                          error_get_pretty(err));
@@ -1135,28 +1135,25 @@ static MTPData *usb_mtp_get_object_prop_value(MTPState *s, MTPControl *c,
     return d;
 }
 
-/* Return correct return code for a delete event */
+/*
+ * Return values when object @o is deleted.
+ * If at least one of the deletions succeeded,
+ * DELETE_SUCCESS is set and if at least one
+ * of the deletions failed, DELETE_FAILURE is
+ * set. Both bits being set (DELETE_PARTIAL)
+ * signifies a  RES_PARTIAL_DELETE being sent
+ * back to the initiator.
+ */
 enum {
-    ALL_DELETE,
-    PARTIAL_DELETE,
-    READ_ONLY,
+    DELETE_SUCCESS = (1 << 0),
+    DELETE_FAILURE = (1 << 1),
+    DELETE_PARTIAL = (DELETE_FAILURE | DELETE_SUCCESS),
 };
-
-/* Assumes that children, if any, have been already freed */
-static void usb_mtp_object_free_one(MTPState *s, MTPObject *o)
-{
-    assert(o->nchildren == 0);
-    QTAILQ_REMOVE(&s->objects, o, next);
-    g_free(o->name);
-    g_free(o->path);
-    g_free(o);
-}
 
 static int usb_mtp_deletefn(MTPState *s, MTPObject *o, uint32_t trans)
 {
     MTPObject *iter, *iter2;
-    bool partial_delete = false;
-    bool success = false;
+    int ret = 0;
 
     /*
      * TODO: Add support for Protection Status
@@ -1165,34 +1162,28 @@ static int usb_mtp_deletefn(MTPState *s, MTPObject *o, uint32_t trans)
     QLIST_FOREACH(iter, &o->children, list) {
         if (iter->format == FMT_ASSOCIATION) {
             QLIST_FOREACH(iter2, &iter->children, list) {
-                usb_mtp_deletefn(s, iter2, trans);
+                ret |= usb_mtp_deletefn(s, iter2, trans);
             }
         }
     }
 
     if (o->format == FMT_UNDEFINED_OBJECT) {
         if (remove(o->path)) {
-            partial_delete = true;
+            ret |= DELETE_FAILURE;
         } else {
-            usb_mtp_object_free_one(s, o);
-            success = true;
+            usb_mtp_object_free(s, o);
+            ret |= DELETE_SUCCESS;
         }
     } else if (o->format == FMT_ASSOCIATION) {
         if (rmdir(o->path)) {
-            partial_delete = true;
+            ret |= DELETE_FAILURE;
         } else {
-            usb_mtp_object_free_one(s, o);
-            success = true;
+            usb_mtp_object_free(s, o);
+            ret |= DELETE_SUCCESS;
         }
     }
 
-    if (success && partial_delete) {
-        return PARTIAL_DELETE;
-    }
-    if (!success && partial_delete) {
-        return READ_ONLY;
-    }
-    return ALL_DELETE;
+    return ret;
 }
 
 static void usb_mtp_object_delete(MTPState *s, uint32_t handle,
@@ -1226,19 +1217,24 @@ static void usb_mtp_object_delete(MTPState *s, uint32_t handle,
     }
 
     ret = usb_mtp_deletefn(s, o, trans);
-    if (ret == PARTIAL_DELETE) {
-        usb_mtp_queue_result(s, RES_PARTIAL_DELETE,
-                             trans, 0, 0, 0, 0);
-        return;
-    } else if (ret == READ_ONLY) {
-        usb_mtp_queue_result(s, RES_STORE_READ_ONLY, trans,
-                             0, 0, 0, 0);
-        return;
-    } else {
+    switch (ret) {
+    case DELETE_SUCCESS:
         usb_mtp_queue_result(s, RES_OK, trans,
                              0, 0, 0, 0);
-        return;
+        break;
+    case DELETE_FAILURE:
+        usb_mtp_queue_result(s, RES_PARTIAL_DELETE,
+                             trans, 0, 0, 0, 0);
+        break;
+    case DELETE_PARTIAL:
+        usb_mtp_queue_result(s, RES_PARTIAL_DELETE,
+                             trans, 0, 0, 0, 0);
+        break;
+    default:
+        g_assert_not_reached();
     }
+
+    return;
 }
 
 static void usb_mtp_command(MTPState *s, MTPControl *c)
@@ -1555,7 +1551,7 @@ static void usb_mtp_cancel_packet(USBDevice *dev, USBPacket *p)
     fprintf(stderr, "%s\n", __func__);
 }
 
-static char *utf16_to_str(uint8_t len, uint16_t *arr)
+static char *utf16_to_str(uint8_t len, uint8_t *str16)
 {
     wchar_t *wstr = g_new0(wchar_t, len + 1);
     int count, dlen;
@@ -1563,7 +1559,7 @@ static char *utf16_to_str(uint8_t len, uint16_t *arr)
 
     for (count = 0; count < len; count++) {
         /* FIXME: not working for surrogate pairs */
-        wstr[count] = (wchar_t)arr[count];
+        wstr[count] = lduw_le_p(str16 + (count * 2));
     }
     wstr[count] = 0;
 
@@ -1591,7 +1587,7 @@ done:
 
 static int usb_mtp_update_object(MTPObject *parent, char *name)
 {
-    int ret = -1;
+    int ret = 0;
 
     MTPObject *o =
         usb_mtp_object_lookup_name(parent, name, strlen(name));
@@ -1703,12 +1699,19 @@ static void usb_mtp_write_metadata(MTPState *s, uint64_t dlen)
     MTPObject *o;
     MTPObject *p = usb_mtp_object_lookup(s, s->dataset.parent_handle);
     uint32_t next_handle = s->next_handle;
+    size_t filename_chars = dlen - offsetof(ObjectInfo, filename);
+
+    /*
+     * filename is utf-16. We're intentionally doing
+     * integer division to truncate if malicious guest
+     * sent an odd number of bytes.
+     */
+    filename_chars /= 2;
 
     assert(!s->write_pending);
     assert(p != NULL);
 
-    filename = utf16_to_str(MIN(dataset->length,
-                                dlen - offsetof(ObjectInfo, filename)),
+    filename = utf16_to_str(MIN(dataset->length, filename_chars),
                             dataset->filename);
 
     if (strchr(filename, '/')) {
@@ -1718,7 +1721,7 @@ static void usb_mtp_write_metadata(MTPState *s, uint64_t dlen)
         return;
     }
 
-    o = usb_mtp_object_lookup_name(p, filename, dataset->length);
+    o = usb_mtp_object_lookup_name(p, filename, -1);
     if (o != NULL) {
         next_handle = o->handle;
     }

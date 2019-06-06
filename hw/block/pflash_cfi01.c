@@ -38,14 +38,18 @@
 
 #include "qemu/osdep.h"
 #include "hw/hw.h"
+#include "hw/block/block.h"
 #include "hw/block/flash.h"
 #include "sysemu/block-backend.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
+#include "qemu/error-report.h"
 #include "qemu/host-utils.h"
 #include "qemu/log.h"
+#include "qemu/option.h"
 #include "hw/sysbus.h"
+#include "sysemu/blockdev.h"
 #include "sysemu/sysemu.h"
 #include "trace.h"
 
@@ -730,13 +734,6 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     }
     device_len = sector_len_per_device * blocks_per_device;
 
-    /* XXX: to be fixed */
-#if 0
-    if (total_len != (8 * 1024 * 1024) && total_len != (16 * 1024 * 1024) &&
-        total_len != (32 * 1024 * 1024) && total_len != (64 * 1024 * 1024))
-        return NULL;
-#endif
-
     memory_region_init_rom_device(
         &pfl->mem, OBJECT(dev),
         &pflash_cfi01_ops,
@@ -763,12 +760,9 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     }
 
     if (pfl->blk) {
-        /* read the initial flash content */
-        ret = blk_pread(pfl->blk, 0, pfl->storage, total_len);
-
-        if (ret < 0) {
+        if (!blk_check_size_and_read_all(pfl->blk, pfl->storage, total_len,
+                                         errp)) {
             vmstate_unregister_ram(&pfl->mem, DEVICE(pfl));
-            error_setg(errp, "failed to read the initial flash content");
             return;
         }
     }
@@ -975,6 +969,31 @@ BlockBackend *pflash_cfi01_get_blk(PFlashCFI01 *fl)
 MemoryRegion *pflash_cfi01_get_memory(PFlashCFI01 *fl)
 {
     return &fl->mem;
+}
+
+/*
+ * Handle -drive if=pflash for machines that use properties.
+ * If @dinfo is null, do nothing.
+ * Else if @fl's property "drive" is already set, fatal error.
+ * Else set it to the BlockBackend with @dinfo.
+ */
+void pflash_cfi01_legacy_drive(PFlashCFI01 *fl, DriveInfo *dinfo)
+{
+    Location loc;
+
+    if (!dinfo) {
+        return;
+    }
+
+    loc_push_none(&loc);
+    qemu_opts_loc_restore(dinfo->opts);
+    if (fl->blk) {
+        error_report("clashes with -machine");
+        exit(1);
+    }
+    qdev_prop_set_drive(DEVICE(fl), "drive",
+                        blk_by_legacy_dinfo(dinfo), &error_fatal);
+    loc_pop(&loc);
 }
 
 static void postload_update_cb(void *opaque, int running, RunState state)

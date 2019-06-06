@@ -99,6 +99,7 @@ enum {
     /* Memory protection and translation */
     XTENSA_OPTION_REGION_PROTECTION,
     XTENSA_OPTION_REGION_TRANSLATION,
+    XTENSA_OPTION_MPU,
     XTENSA_OPTION_MMU,
     XTENSA_OPTION_CACHEATTR,
 
@@ -137,13 +138,23 @@ enum {
     PTEVADDR = 83,
     MMID = 89,
     RASID = 90,
+    MPUENB = 90,
     ITLBCFG = 91,
     DTLBCFG = 92,
+    MPUCFG = 92,
+    ERACCESS = 95,
     IBREAKENABLE = 96,
     MEMCTL = 97,
     CACHEATTR = 98,
+    CACHEADRDIS = 98,
     ATOMCTL = 99,
     DDR = 104,
+    MEPC = 106,
+    MEPS = 107,
+    MESAVE = 108,
+    MESR = 109,
+    MECR = 110,
+    MEVADDR = 111,
     IBREAKA = 128,
     DBREAKA = 144,
     DBREAKC = 160,
@@ -228,6 +239,7 @@ enum {
 #define MAX_TLB_WAY_SIZE 8
 #define MAX_NDBREAK 2
 #define MAX_NMEMORY 4
+#define MAX_MPU_FOREGROUND_SEGMENTS 32
 
 #define REGION_PAGE_MASK 0xe0000000
 
@@ -268,14 +280,15 @@ enum {
     LEVEL1_INTERRUPT_CAUSE,
     ALLOCA_CAUSE,
     INTEGER_DIVIDE_BY_ZERO_CAUSE,
-    PRIVILEGED_CAUSE = 8,
+    PC_VALUE_ERROR_CAUSE,
+    PRIVILEGED_CAUSE,
     LOAD_STORE_ALIGNMENT_CAUSE,
-
-    INSTR_PIF_DATA_ERROR_CAUSE = 12,
+    EXTERNAL_REG_PRIVILEGE_CAUSE,
+    EXCLUSIVE_ERROR_CAUSE,
+    INSTR_PIF_DATA_ERROR_CAUSE,
     LOAD_STORE_PIF_DATA_ERROR_CAUSE,
     INSTR_PIF_ADDR_ERROR_CAUSE,
     LOAD_STORE_PIF_ADDR_ERROR_CAUSE,
-
     INST_TLB_MISS_CAUSE,
     INST_TLB_MULTI_HIT_CAUSE,
     INST_FETCH_PRIVILEGE_CAUSE,
@@ -298,6 +311,9 @@ typedef enum {
     INTTYPE_DEBUG,
     INTTYPE_WRITE_ERR,
     INTTYPE_PROFILING,
+    INTTYPE_IDMA_DONE,
+    INTTYPE_IDMA_ERR,
+    INTTYPE_GS_ERR,
     INTTYPE_MAX
 } interrupt_type;
 
@@ -317,6 +333,11 @@ typedef struct xtensa_tlb {
     bool varway56;
     unsigned nrefillentries;
 } xtensa_tlb;
+
+typedef struct xtensa_mpu_entry {
+    uint32_t vaddr;
+    uint32_t attr;
+} xtensa_mpu_entry;
 
 typedef struct XtensaGdbReg {
     int targno;
@@ -446,6 +467,7 @@ struct XtensaConfig {
 
     unsigned icache_ways;
     unsigned dcache_ways;
+    unsigned dcache_line_bytes;
     uint32_t memctl_mask;
 
     XtensaMemory instrom;
@@ -468,6 +490,11 @@ struct XtensaConfig {
 
     xtensa_tlb itlb;
     xtensa_tlb dtlb;
+
+    uint32_t mpu_align;
+    unsigned n_mpu_fg_segments;
+    unsigned n_mpu_bg_segments;
+    const xtensa_mpu_entry *mpu_bg;
 };
 
 typedef struct XtensaConfigList {
@@ -500,10 +527,13 @@ typedef struct CPUXtensaState {
     } fregs[16];
     float_status fp_status;
     uint32_t windowbase_next;
+    uint32_t exclusive_addr;
+    uint32_t exclusive_val;
 
 #ifndef CONFIG_USER_ONLY
     xtensa_tlb_entry itlb[7][MAX_TLB_WAY_SIZE];
     xtensa_tlb_entry dtlb[10][MAX_TLB_WAY_SIZE];
+    xtensa_mpu_entry mpu_fg[MAX_MPU_FOREGROUND_SEGMENTS];
     unsigned autorefill_idx;
     bool runstall;
     AddressSpace *address_space_er;
@@ -552,16 +582,16 @@ static inline XtensaCPU *xtensa_env_get_cpu(const CPUXtensaState *env)
 #define ENV_OFFSET offsetof(XtensaCPU, env)
 
 
-int xtensa_cpu_handle_mmu_fault(CPUState *cs, vaddr address, int rw, int size,
-                                int mmu_idx);
+bool xtensa_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                         MMUAccessType access_type, int mmu_idx,
+                         bool probe, uintptr_t retaddr);
 void xtensa_cpu_do_interrupt(CPUState *cpu);
 bool xtensa_cpu_exec_interrupt(CPUState *cpu, int interrupt_request);
 void xtensa_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
                                       unsigned size, MMUAccessType access_type,
                                       int mmu_idx, MemTxAttrs attrs,
                                       MemTxResult response, uintptr_t retaddr);
-void xtensa_cpu_dump_state(CPUState *cpu, FILE *f,
-                           fprintf_function cpu_fprintf, int flags);
+void xtensa_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr xtensa_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 void xtensa_count_regs(const XtensaConfig *config,
                        unsigned *n_regs, unsigned *n_core_regs);
@@ -590,6 +620,7 @@ void xtensa_cpu_do_unaligned_access(CPUState *cpu, vaddr addr,
 #define XTENSA_DEFAULT_CPU_NOMMU_TYPE \
     XTENSA_CPU_TYPE_NAME(XTENSA_DEFAULT_CPU_NOMMU_MODEL)
 
+void xtensa_collect_sr_names(const XtensaConfig *config);
 void xtensa_translate_init(void);
 void **xtensa_get_regfile_by_name(const char *name);
 void xtensa_breakpoint_handler(CPUState *cs);
@@ -600,7 +631,7 @@ void xtensa_irq_init(CPUXtensaState *env);
 qemu_irq *xtensa_get_extints(CPUXtensaState *env);
 qemu_irq xtensa_get_runstall(CPUXtensaState *env);
 int cpu_xtensa_signal_handler(int host_signum, void *pinfo, void *puc);
-void xtensa_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void xtensa_cpu_list(void);
 void xtensa_sync_window_from_phys(CPUXtensaState *env);
 void xtensa_sync_phys_from_window(CPUXtensaState *env);
 void xtensa_rotate_window(CPUXtensaState *env, uint32_t delta);
@@ -658,34 +689,15 @@ static inline int xtensa_get_cring(const CPUXtensaState *env)
 }
 
 #ifndef CONFIG_USER_ONLY
-uint32_t xtensa_tlb_get_addr_mask(const CPUXtensaState *env,
-                                  bool dtlb, uint32_t way);
-void split_tlb_entry_spec_way(const CPUXtensaState *env, uint32_t v, bool dtlb,
-        uint32_t *vpn, uint32_t wi, uint32_t *ei);
-int xtensa_tlb_lookup(const CPUXtensaState *env, uint32_t addr, bool dtlb,
-        uint32_t *pwi, uint32_t *pei, uint8_t *pring);
-void xtensa_tlb_set_entry_mmu(const CPUXtensaState *env,
-        xtensa_tlb_entry *entry, bool dtlb,
-        unsigned wi, unsigned ei, uint32_t vpn, uint32_t pte);
-void xtensa_tlb_set_entry(CPUXtensaState *env, bool dtlb,
-        unsigned wi, unsigned ei, uint32_t vpn, uint32_t pte);
 int xtensa_get_physical_addr(CPUXtensaState *env, bool update_tlb,
         uint32_t vaddr, int is_write, int mmu_idx,
         uint32_t *paddr, uint32_t *page_size, unsigned *access);
 void reset_mmu(CPUXtensaState *env);
-void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUXtensaState *env);
+void dump_mmu(CPUXtensaState *env);
 
 static inline MemoryRegion *xtensa_get_er_region(CPUXtensaState *env)
 {
     return env->system_er;
-}
-
-static inline xtensa_tlb_entry *xtensa_tlb_get_entry(CPUXtensaState *env,
-        bool dtlb, unsigned wi, unsigned ei)
-{
-    return dtlb ?
-        env->dtlb[wi] + ei :
-        env->itlb[wi] + ei;
 }
 #endif
 

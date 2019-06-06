@@ -7,6 +7,7 @@
  * This work is licensed under the GNU GPL license version 2 or later.
  */
 
+#include "qemu/osdep.h"
 #include "ati_int.h"
 #include "ati_regs.h"
 #include "qemu/log.h"
@@ -79,10 +80,10 @@ void ati_2d_blt(ATIVGAState *s)
                 s->regs.dst_width, s->regs.dst_height);
         end = s->vga.vram_ptr + s->vga.vram_size;
         if (src_bits >= end || dst_bits >= end ||
-            src_bits + (s->regs.src_y + s->regs.dst_height) * src_stride +
-            s->regs.src_x >= end ||
-            dst_bits + (s->regs.dst_y + s->regs.dst_height) * dst_stride +
-            s->regs.dst_x >= end) {
+            src_bits + s->regs.src_x + (s->regs.src_y + s->regs.dst_height) *
+            src_stride * sizeof(uint32_t) >= end ||
+            dst_bits + s->regs.dst_x + (s->regs.dst_y + s->regs.dst_height) *
+            dst_stride * sizeof(uint32_t) >= end) {
             qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
             return;
         }
@@ -140,8 +141,8 @@ void ati_2d_blt(ATIVGAState *s)
                 filler);
         end = s->vga.vram_ptr + s->vga.vram_size;
         if (dst_bits >= end ||
-            dst_bits + (s->regs.dst_y + s->regs.dst_height) * dst_stride +
-            s->regs.dst_x >= end) {
+            dst_bits + s->regs.dst_x + (s->regs.dst_y + s->regs.dst_height) *
+            dst_stride * sizeof(uint32_t) >= end) {
             qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
             return;
         }

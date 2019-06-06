@@ -97,8 +97,7 @@ static inline UniCore32CPU *uc32_env_get_cpu(CPUUniCore32State *env)
 
 void uc32_cpu_do_interrupt(CPUState *cpu);
 bool uc32_cpu_exec_interrupt(CPUState *cpu, int int_req);
-void uc32_cpu_dump_state(CPUState *cpu, FILE *f,
-                         fprintf_function cpu_fprintf, int flags);
+void uc32_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr uc32_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 
 #define ASR_M                   (0x1f)
@@ -179,8 +178,9 @@ static inline void cpu_get_tb_cpu_state(CPUUniCore32State *env, target_ulong *pc
     }
 }
 
-int uc32_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int size, int rw,
-                              int mmu_idx);
+bool uc32_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr);
 void uc32_translate_init(void);
 void switch_mode(CPUUniCore32State *, int);
 

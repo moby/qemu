@@ -46,7 +46,7 @@ void riscv_set_csr_ops(int csrno, riscv_csr_operations *ops)
 static int fs(CPURISCVState *env, int csrno)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
 #endif
@@ -92,7 +92,7 @@ static int pmp(CPURISCVState *env, int csrno)
 static int read_fflags(CPURISCVState *env, int csrno, target_ulong *val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
 #endif
@@ -103,7 +103,7 @@ static int read_fflags(CPURISCVState *env, int csrno, target_ulong *val)
 static int write_fflags(CPURISCVState *env, int csrno, target_ulong val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
     env->mstatus |= MSTATUS_FS;
@@ -115,7 +115,7 @@ static int write_fflags(CPURISCVState *env, int csrno, target_ulong val)
 static int read_frm(CPURISCVState *env, int csrno, target_ulong *val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
 #endif
@@ -126,7 +126,7 @@ static int read_frm(CPURISCVState *env, int csrno, target_ulong *val)
 static int write_frm(CPURISCVState *env, int csrno, target_ulong val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
     env->mstatus |= MSTATUS_FS;
@@ -138,7 +138,7 @@ static int write_frm(CPURISCVState *env, int csrno, target_ulong val)
 static int read_fcsr(CPURISCVState *env, int csrno, target_ulong *val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
 #endif
@@ -150,7 +150,7 @@ static int read_fcsr(CPURISCVState *env, int csrno, target_ulong *val)
 static int write_fcsr(CPURISCVState *env, int csrno, target_ulong val)
 {
 #if !defined(CONFIG_USER_ONLY)
-    if (!(env->mstatus & MSTATUS_FS)) {
+    if (!env->debugger && !(env->mstatus & MSTATUS_FS)) {
         return -1;
     }
     env->mstatus |= MSTATUS_FS;
@@ -237,6 +237,7 @@ static const target_ulong sstatus_v1_9_mask = SSTATUS_SIE | SSTATUS_SPIE |
 static const target_ulong sstatus_v1_10_mask = SSTATUS_SIE | SSTATUS_SPIE |
     SSTATUS_UIE | SSTATUS_UPIE | SSTATUS_SPP | SSTATUS_FS | SSTATUS_XS |
     SSTATUS_SUM | SSTATUS_MXR | SSTATUS_SD;
+static const target_ulong sip_writable_mask = SIP_SSIP | MIP_USIP | MIP_UEIP;
 
 #if defined(TARGET_RISCV32)
 static const char valid_vm_1_09[16] = {
@@ -290,7 +291,6 @@ static int write_mstatus(CPURISCVState *env, int csrno, target_ulong val)
 {
     target_ulong mstatus = env->mstatus;
     target_ulong mask = 0;
-    target_ulong mpp = get_field(val, MSTATUS_MPP);
 
     /* flush tlb on mstatus fields that affect VM */
     if (env->priv_ver <= PRIV_VERSION_1_09_1) {
@@ -305,7 +305,7 @@ static int write_mstatus(CPURISCVState *env, int csrno, target_ulong val)
                 MSTATUS_VM : 0);
     }
     if (env->priv_ver >= PRIV_VERSION_1_10_0) {
-        if ((val ^ mstatus) & (MSTATUS_MXR | MSTATUS_MPP |
+        if ((val ^ mstatus) & (MSTATUS_MXR | MSTATUS_MPP | MSTATUS_MPV |
                 MSTATUS_MPRV | MSTATUS_SUM)) {
             tlb_flush(CPU(riscv_env_get_cpu(env)));
         }
@@ -313,13 +313,13 @@ static int write_mstatus(CPURISCVState *env, int csrno, target_ulong val)
             MSTATUS_SPP | MSTATUS_FS | MSTATUS_MPRV | MSTATUS_SUM |
             MSTATUS_MPP | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TSR |
             MSTATUS_TW;
-    }
-
-    /* silenty discard mstatus.mpp writes for unsupported modes */
-    if (mpp == PRV_H ||
-        (!riscv_has_ext(env, RVS) && mpp == PRV_S) ||
-        (!riscv_has_ext(env, RVU) && mpp == PRV_U)) {
-        mask &= ~MSTATUS_MPP;
+#if defined(TARGET_RISCV64)
+            /*
+             * RV32: MPV and MTL are not in mstatus. The current plan is to
+             * add them to mstatush. For now, we just don't support it.
+             */
+            mask |= MSTATUS_MPP | MSTATUS_MPV;
+#endif
     }
 
     mstatus = (mstatus & ~mask) | (val & mask);
@@ -435,10 +435,10 @@ static int read_mtvec(CPURISCVState *env, int csrno, target_ulong *val)
 static int write_mtvec(CPURISCVState *env, int csrno, target_ulong val)
 {
     /* bits [1:0] encode mode; 0 = direct, 1 = vectored, 2 >= reserved */
-    if ((val & 3) == 0) {
-        env->mtvec = val >> 2 << 2;
+    if ((val & 3) < 2) {
+        env->mtvec = val;
     } else {
-        qemu_log_mask(LOG_UNIMP, "CSR_MTVEC: vectored traps not supported");
+        qemu_log_mask(LOG_UNIMP, "CSR_MTVEC: reserved mode not supported\n");
     }
     return 0;
 }
@@ -550,20 +550,12 @@ static int rmw_mip(CPURISCVState *env, int csrno, target_ulong *ret_value,
                    target_ulong new_value, target_ulong write_mask)
 {
     RISCVCPU *cpu = riscv_env_get_cpu(env);
-    target_ulong mask = write_mask & delegable_ints;
+    /* Allow software control of delegable interrupts not claimed by hardware */
+    target_ulong mask = write_mask & delegable_ints & ~env->miclaim;
     uint32_t old_mip;
 
-    /* We can't allow the supervisor to control SEIP as this would allow the
-     * supervisor to clear a pending external interrupt which will result in
-     * lost a interrupt in the case a PLIC is attached. The SEIP bit must be
-     * hardware controlled when a PLIC is attached. This should be an option
-     * for CPUs with software-delegated Supervisor External Interrupts. */
-    mask &= ~MIP_SEIP;
-
     if (mask) {
-        qemu_mutex_lock_iothread();
         old_mip = riscv_cpu_update_mip(cpu, mask, (new_value & mask));
-        qemu_mutex_unlock_iothread();
     } else {
         old_mip = atomic_read(&env->mip);
     }
@@ -613,10 +605,10 @@ static int read_stvec(CPURISCVState *env, int csrno, target_ulong *val)
 static int write_stvec(CPURISCVState *env, int csrno, target_ulong val)
 {
     /* bits [1:0] encode mode; 0 = direct, 1 = vectored, 2 >= reserved */
-    if ((val & 3) == 0) {
-        env->stvec = val >> 2 << 2;
+    if ((val & 3) < 2) {
+        env->stvec = val;
     } else {
-        qemu_log_mask(LOG_UNIMP, "CSR_STVEC: vectored traps not supported");
+        qemu_log_mask(LOG_UNIMP, "CSR_STVEC: reserved mode not supported\n");
     }
     return 0;
 }
@@ -691,8 +683,10 @@ static int write_sbadaddr(CPURISCVState *env, int csrno, target_ulong val)
 static int rmw_sip(CPURISCVState *env, int csrno, target_ulong *ret_value,
                    target_ulong new_value, target_ulong write_mask)
 {
-    return rmw_mip(env, CSR_MSTATUS, ret_value, new_value,
-                   write_mask & env->mideleg);
+    int ret = rmw_mip(env, CSR_MSTATUS, ret_value, new_value,
+                      write_mask & env->mideleg & sip_writable_mask);
+    *ret_value &= env->mideleg;
+    return ret;
 }
 
 /* Supervisor Protection and Translation */
@@ -729,7 +723,9 @@ static int write_satp(CPURISCVState *env, int csrno, target_ulong val)
         if (env->priv == PRV_S && get_field(env->mstatus, MSTATUS_TVM)) {
             return -1;
         } else {
-            tlb_flush(CPU(riscv_env_get_cpu(env)));
+            if((val ^ env->satp) & SATP_ASID) {
+                tlb_flush(CPU(riscv_env_get_cpu(env)));
+            }
             env->satp = val;
         }
     }
@@ -825,6 +821,24 @@ int riscv_csrrw(CPURISCVState *env, int csrno, target_ulong *ret_value,
     }
 
     return 0;
+}
+
+/*
+ * Debugger support.  If not in user mode, set env->debugger before the
+ * riscv_csrrw call and clear it after the call.
+ */
+int riscv_csrrw_debug(CPURISCVState *env, int csrno, target_ulong *ret_value,
+                target_ulong new_value, target_ulong write_mask)
+{
+    int ret;
+#if !defined(CONFIG_USER_ONLY)
+    env->debugger = true;
+#endif
+    ret = riscv_csrrw(env, csrno, ret_value, new_value, write_mask);
+#if !defined(CONFIG_USER_ONLY)
+    env->debugger = false;
+#endif
+    return ret;
 }
 
 /* Control and Status Register function table */

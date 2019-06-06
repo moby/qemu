@@ -87,6 +87,10 @@ endif
 
 include $(SRC_PATH)/rules.mak
 
+# notempy and lor are defined in rules.mak
+CONFIG_TOOLS := $(call notempty,$(TOOLS))
+CONFIG_BLOCK := $(call lor,$(CONFIG_SOFTMMU),$(CONFIG_TOOLS))
+
 # Create QEMU_PKGVERSION and FULL_VERSION strings
 # If PKGVERSION is set, use that; otherwise get version and -dirty status from git
 QEMU_PKGVERSION := $(if $(PKGVERSION),$(PKGVERSION),$(shell \
@@ -101,7 +105,7 @@ QEMU_PKGVERSION := $(if $(PKGVERSION),$(PKGVERSION),$(shell \
 # Either "version (pkgversion)", or just "version" if pkgversion not set
 FULL_VERSION := $(if $(QEMU_PKGVERSION),$(VERSION) ($(QEMU_PKGVERSION)),$(VERSION))
 
-GENERATED_FILES = qemu-version.h config-host.h qemu-options.def
+generated-files-y = qemu-version.h config-host.h qemu-options.def
 
 GENERATED_QAPI_FILES = qapi/qapi-builtin-types.h qapi/qapi-builtin-types.c
 GENERATED_QAPI_FILES += qapi/qapi-types.h qapi/qapi-types.c
@@ -121,20 +125,18 @@ GENERATED_QAPI_FILES += $(QAPI_MODULES:%=qapi/qapi-events-%.c)
 GENERATED_QAPI_FILES += qapi/qapi-introspect.c qapi/qapi-introspect.h
 GENERATED_QAPI_FILES += qapi/qapi-doc.texi
 
-GENERATED_FILES += $(GENERATED_QAPI_FILES)
+generated-files-y += $(GENERATED_QAPI_FILES)
 
-GENERATED_FILES += trace/generated-tcg-tracers.h
+generated-files-y += trace/generated-tcg-tracers.h
 
-GENERATED_FILES += trace/generated-helpers-wrappers.h
-GENERATED_FILES += trace/generated-helpers.h
-GENERATED_FILES += trace/generated-helpers.c
+generated-files-y += trace/generated-helpers-wrappers.h
+generated-files-y += trace/generated-helpers.h
+generated-files-y += trace/generated-helpers.c
 
-ifdef CONFIG_TRACE_UST
-GENERATED_FILES += trace-ust-all.h
-GENERATED_FILES += trace-ust-all.c
-endif
+generated-files-$(CONFIG_TRACE_UST) += trace-ust-all.h
+generated-files-$(CONFIG_TRACE_UST) += trace-ust-all.c
 
-GENERATED_FILES += module_block.h
+generated-files-y += module_block.h
 
 TRACE_HEADERS = trace-root.h $(trace-events-subdirs:%=%/trace.h)
 TRACE_SOURCES = trace-root.c $(trace-events-subdirs:%=%/trace.c)
@@ -147,10 +149,10 @@ ifdef CONFIG_TRACE_UST
 TRACE_HEADERS += trace-ust-root.h $(trace-events-subdirs:%=%/trace-ust.h)
 endif
 
-GENERATED_FILES += $(TRACE_HEADERS)
-GENERATED_FILES += $(TRACE_SOURCES)
-GENERATED_FILES += $(BUILD_DIR)/trace-events-all
-GENERATED_FILES += .git-submodule-status
+generated-files-y += $(TRACE_HEADERS)
+generated-files-y += $(TRACE_SOURCES)
+generated-files-y += $(BUILD_DIR)/trace-events-all
+generated-files-y += .git-submodule-status
 
 trace-group-name = $(shell dirname $1 | sed -e 's/[^a-zA-Z0-9]/_/g')
 
@@ -281,7 +283,7 @@ KEYCODEMAP_FILES = \
 		 ui/input-keymap-osx-to-qcode.c \
 		 $(NULL)
 
-GENERATED_FILES += $(KEYCODEMAP_FILES)
+generated-files-$(CONFIG_SOFTMMU) += $(KEYCODEMAP_FILES)
 
 ui/input-keymap-%.c: $(KEYCODEMAP_GEN) $(KEYCODEMAP_CSV) $(SRC_PATH)/ui/Makefile.objs
 	$(call quiet-command,\
@@ -296,6 +298,10 @@ ui/input-keymap-%.c: $(KEYCODEMAP_GEN) $(KEYCODEMAP_CSV) $(SRC_PATH)/ui/Makefile
 $(KEYCODEMAP_GEN): .git-submodule-status
 $(KEYCODEMAP_CSV): .git-submodule-status
 
+edk2-decompressed = $(basename $(wildcard pc-bios/edk2-*.fd.bz2))
+pc-bios/edk2-%.fd: pc-bios/edk2-%.fd.bz2
+	$(call quiet-command,bzip2 -d -c $< > $@,"BUNZIP2",$<)
+
 # Don't try to regenerate Makefile or configure
 # We don't generate any of them
 Makefile: ;
@@ -308,7 +314,19 @@ $(call set-vpath, $(SRC_PATH))
 
 LIBS+=-lz $(LIBS_TOOLS)
 
+vhost-user-json-y =
+HELPERS-y =
+
 HELPERS-$(call land,$(CONFIG_SOFTMMU),$(CONFIG_LINUX)) = qemu-bridge-helper$(EXESUF)
+
+ifdef CONFIG_LINUX
+ifdef CONFIG_VIRGL
+ifdef CONFIG_GBM
+HELPERS-y += vhost-user-gpu$(EXESUF)
+vhost-user-json-y += contrib/vhost-user-gpu/50-qemu-gpu.json
+endif
+endif
+endif
 
 ifdef BUILD_DOCS
 DOCS=qemu-doc.html qemu-doc.txt qemu.1 qemu-img.1 qemu-nbd.8 qemu-ga.8
@@ -331,10 +349,10 @@ SUBDIR_DEVICES_MAK=$(patsubst %, %/config-devices.mak, $(filter %-softmmu, $(TAR
 SUBDIR_DEVICES_MAK_DEP=$(patsubst %, %.d, $(SUBDIR_DEVICES_MAK))
 
 ifeq ($(SUBDIR_DEVICES_MAK),)
-config-all-devices.mak:
+config-all-devices.mak: config-host.mak
 	$(call quiet-command,echo '# no devices' > $@,"GEN","$@")
 else
-config-all-devices.mak: $(SUBDIR_DEVICES_MAK)
+config-all-devices.mak: $(SUBDIR_DEVICES_MAK) config-host.mak
 	$(call quiet-command, sed -n \
              's|^\([^=]*\)=\(.*\)$$|\1:=$$(findstring y,$$(\1)\2)|p' \
              $(SUBDIR_DEVICES_MAK) | sort -u > $@, \
@@ -346,7 +364,7 @@ endif
 # This has to be kept in sync with Kconfig.host.
 MINIKCONF_ARGS = \
     $(CONFIG_MINIKCONF_MODE) \
-    $@ $*-config.devices.mak.d $< $(MINIKCONF_INPUTS) \
+    $@ $*/config-devices.mak.d $< $(MINIKCONF_INPUTS) \
     CONFIG_KVM=$(CONFIG_KVM) \
     CONFIG_SPICE=$(CONFIG_SPICE) \
     CONFIG_IVSHMEM=$(CONFIG_IVSHMEM) \
@@ -356,7 +374,8 @@ MINIKCONF_ARGS = \
     CONFIG_X11=$(CONFIG_X11) \
     CONFIG_VHOST_USER=$(CONFIG_VHOST_USER) \
     CONFIG_VIRTFS=$(CONFIG_VIRTFS) \
-    CONFIG_LINUX=$(CONFIG_LINUX)
+    CONFIG_LINUX=$(CONFIG_LINUX) \
+    CONFIG_PVRDMA=$(CONFIG_PVRDMA)
 
 MINIKCONF_INPUTS = $(SRC_PATH)/Kconfig.host $(SRC_PATH)/hw/Kconfig
 MINIKCONF = $(PYTHON) $(SRC_PATH)/scripts/minikconf.py \
@@ -401,11 +420,13 @@ dummy := $(call unnest-vars,, \
                 libvhost-user-obj-y \
                 vhost-user-scsi-obj-y \
                 vhost-user-blk-obj-y \
+                vhost-user-input-obj-y \
+                vhost-user-gpu-obj-y \
                 qga-vss-dll-obj-y \
                 block-obj-y \
                 block-obj-m \
                 crypto-obj-y \
-                crypto-aes-obj-y \
+                crypto-user-obj-y \
                 qom-obj-y \
                 io-obj-y \
                 common-obj-y \
@@ -418,7 +439,7 @@ dummy := $(call unnest-vars,, \
 
 include $(SRC_PATH)/tests/Makefile.include
 
-all: $(DOCS) $(if $(BUILD_DOCS),sphinxdocs) $(TOOLS) $(HELPERS-y) recurse-all modules
+all: $(DOCS) $(if $(BUILD_DOCS),sphinxdocs) $(TOOLS) $(HELPERS-y) recurse-all modules $(vhost-user-json-y)
 
 qemu-version.h: FORCE
 	$(call quiet-command, \
@@ -441,9 +462,11 @@ SOFTMMU_SUBDIR_RULES=$(filter %-softmmu,$(SUBDIR_RULES))
 
 $(SOFTMMU_SUBDIR_RULES): $(authz-obj-y)
 $(SOFTMMU_SUBDIR_RULES): $(block-obj-y)
+$(SOFTMMU_SUBDIR_RULES): $(chardev-obj-y)
 $(SOFTMMU_SUBDIR_RULES): $(crypto-obj-y)
 $(SOFTMMU_SUBDIR_RULES): $(io-obj-y)
 $(SOFTMMU_SUBDIR_RULES): config-all-devices.mak
+$(SOFTMMU_SUBDIR_RULES): $(edk2-decompressed)
 
 subdir-%:
 	$(call quiet-command,$(MAKE) $(SUBDIR_MAKEFLAGS) -C $* V="$(V)" TARGET_DIR="$*/" all,)
@@ -474,10 +497,10 @@ subdir-capstone: .git-submodule-status
 	$(call quiet-command,$(MAKE) -C $(SRC_PATH)/capstone CAPSTONE_SHARED=no BUILDDIR="$(BUILD_DIR)/capstone" CC="$(CC)" AR="$(AR)" LD="$(LD)" RANLIB="$(RANLIB)" CFLAGS="$(CAP_CFLAGS)" $(SUBDIR_MAKEFLAGS) $(BUILD_DIR)/capstone/$(LIBCAPSTONE))
 
 subdir-slirp: .git-submodule-status
-	$(call quiet-command,$(MAKE) -C $(SRC_PATH)/slirp BUILD_DIR="$(BUILD_DIR)/slirp" CC="$(CC)" AR="$(AR)" LD="$(LD)" RANLIB="$(RANLIB)" CFLAGS="$(QEMU_CFLAGS)")
+	$(call quiet-command,$(MAKE) -C $(SRC_PATH)/slirp BUILD_DIR="$(BUILD_DIR)/slirp" CC="$(CC)" AR="$(AR)" LD="$(LD)" RANLIB="$(RANLIB)" CFLAGS="$(QEMU_CFLAGS) $(CFLAGS)" LDFLAGS="$(LDFLAGS)")
 
-$(SUBDIR_RULES): libqemuutil.a $(common-obj-y) $(chardev-obj-y) \
-	$(qom-obj-y) $(crypto-aes-obj-$(CONFIG_USER_ONLY))
+$(SUBDIR_RULES): libqemuutil.a $(common-obj-y) \
+	$(qom-obj-y) $(crypto-user-obj-$(CONFIG_USER_ONLY))
 
 ROMSUBDIR_RULES=$(patsubst %,romsubdir-%, $(ROMS))
 # Only keep -O and -g cflags
@@ -609,6 +632,19 @@ rdmacm-mux$(EXESUF): LIBS += "-libumad"
 rdmacm-mux$(EXESUF): $(rdmacm-mux-obj-y) $(COMMON_LDADDS)
 	$(call LINK, $^)
 
+vhost-user-gpu$(EXESUF): $(vhost-user-gpu-obj-y) $(libvhost-user-obj-y) libqemuutil.a libqemustub.a
+	$(call LINK, $^)
+
+ifdef CONFIG_VHOST_USER_INPUT
+ifdef CONFIG_LINUX
+vhost-user-input$(EXESUF): $(vhost-user-input-obj-y) libvhost-user.a libqemuutil.a
+	$(call LINK, $^)
+
+# build by default, do not install
+all: vhost-user-input$(EXESUF)
+endif
+endif
+
 module_block.h: $(SRC_PATH)/scripts/modules/module_block.py config-host.mak
 	$(call quiet-command,$(PYTHON) $< $@ \
 	$(addprefix $(SRC_PATH)/,$(patsubst %.mo,%.c,$(block-obj-m))), \
@@ -632,14 +668,15 @@ clean:
 		! -path ./roms/edk2/ArmPkg/Library/GccLto/liblto-arm.a \
 		! -path ./roms/edk2/BaseTools/Source/Python/UPT/Dll/sqlite3.dll \
 		-exec rm {} +
-	rm -f $(filter-out %.tlb,$(TOOLS)) $(HELPERS-y) qemu-ga TAGS cscope.* *.pod *~ */*~
+	rm -f $(edk2-decompressed)
+	rm -f $(filter-out %.tlb,$(TOOLS)) $(HELPERS-y) qemu-ga$(EXESUF) TAGS cscope.* *.pod *~ */*~
 	rm -f fsdev/*.pod scsi/*.pod
 	rm -f qemu-img-cmds.h
 	rm -f ui/shader/*-vert.h ui/shader/*-frag.h
-	@# May not be present in GENERATED_FILES
+	@# May not be present in generated-files-y
 	rm -f trace/generated-tracers-dtrace.dtrace*
 	rm -f trace/generated-tracers-dtrace.h*
-	rm -f $(foreach f,$(GENERATED_FILES),$(f) $(f)-timestamp)
+	rm -f $(foreach f,$(generated-files-y),$(f) $(f)-timestamp)
 	rm -f qapi-gen-timestamp
 	rm -rf qga/qapi-generated
 	for d in $(ALL_SUBDIRS); do \
@@ -722,9 +759,14 @@ spapr-rtas.bin slof.bin skiboot.lid \
 palcode-clipper \
 u-boot.e500 u-boot-sam460-20100605.bin \
 qemu_vga.ndrv \
+edk2-licenses.txt \
 hppa-firmware.img
+
+DESCS=50-edk2-i386-secure.json 50-edk2-x86_64-secure.json \
+60-edk2-aarch64.json 60-edk2-arm.json 60-edk2-i386.json 60-edk2-x86_64.json
 else
 BLOBS=
+DESCS=
 endif
 
 # Note that we manually filter-out the non-Sphinx documentation which
@@ -785,7 +827,8 @@ endif
 
 ICON_SIZES=16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512
 
-install: all $(if $(BUILD_DOCS),install-doc) install-datadir install-localstatedir
+install: all $(if $(BUILD_DOCS),install-doc) install-datadir install-localstatedir \
+	$(if $(INSTALL_BLOBS),$(edk2-decompressed))
 ifneq ($(TOOLS),)
 	$(call install-prog,$(subst qemu-ga,qemu-ga$(EXESUF),$(TOOLS)),$(DESTDIR)$(bindir))
 endif
@@ -800,12 +843,33 @@ endif
 ifneq ($(HELPERS-y),)
 	$(call install-prog,$(HELPERS-y),$(DESTDIR)$(libexecdir))
 endif
+ifneq ($(vhost-user-json-y),)
+	$(INSTALL_DIR) "$(DESTDIR)$(qemu_datadir)/vhost-user/"
+	for x in $(vhost-user-json-y); do \
+		$(INSTALL_DATA) $$x "$(DESTDIR)$(qemu_datadir)/vhost-user/"; \
+	done
+endif
 ifdef CONFIG_TRACE_SYSTEMTAP
 	$(INSTALL_PROG) "scripts/qemu-trace-stap" $(DESTDIR)$(bindir)
 endif
 ifneq ($(BLOBS),)
 	set -e; for x in $(BLOBS); do \
 		$(INSTALL_DATA) $(SRC_PATH)/pc-bios/$$x "$(DESTDIR)$(qemu_datadir)"; \
+	done
+endif
+ifdef INSTALL_BLOBS
+	set -e; for x in $(edk2-decompressed); do \
+		$(INSTALL_DATA) $$x "$(DESTDIR)$(qemu_datadir)"; \
+	done
+endif
+ifneq ($(DESCS),)
+	$(INSTALL_DIR) "$(DESTDIR)$(qemu_datadir)/firmware"
+	set -e; tmpf=$$(mktemp); trap 'rm -f -- "$$tmpf"' EXIT; \
+	for x in $(DESCS); do \
+		sed -e 's,@DATADIR@,$(DESTDIR)$(qemu_datadir),' \
+			"$(SRC_PATH)/pc-bios/descriptors/$$x" > "$$tmpf"; \
+		$(INSTALL_DATA) "$$tmpf" \
+			"$(DESTDIR)$(qemu_datadir)/firmware/$$x"; \
 	done
 endif
 	for s in $(ICON_SIZES); do \
@@ -871,11 +935,14 @@ ui/shader.o: $(SRC_PATH)/ui/shader.c \
 MAKEINFO=makeinfo
 MAKEINFOINCLUDES= -I docs -I $(<D) -I $(@D)
 MAKEINFOFLAGS=--no-split --number-sections $(MAKEINFOINCLUDES)
-TEXI2PODFLAGS=$(MAKEINFOINCLUDES) "-DVERSION=$(VERSION)"
+TEXI2PODFLAGS=$(MAKEINFOINCLUDES) -DVERSION="$(VERSION)" -DCONFDIR="$(qemu_confdir)"
 TEXI2PDFFLAGS=$(if $(V),,--quiet) -I $(SRC_PATH) $(MAKEINFOINCLUDES)
 
-docs/version.texi: $(SRC_PATH)/VERSION
-	$(call quiet-command,echo "@set VERSION $(VERSION)" > $@,"GEN","$@")
+docs/version.texi: $(SRC_PATH)/VERSION config-host.mak
+	$(call quiet-command,(\
+		echo "@set VERSION $(VERSION)" && \
+		echo "@set CONFDIR $(qemu_confdir)" \
+	)> $@,"GEN","$@")
 
 %.html: %.texi docs/version.texi
 	$(call quiet-command,LC_ALL=C $(MAKEINFO) $(MAKEINFOFLAGS) --no-headers \
@@ -898,7 +965,7 @@ docs/version.texi: $(SRC_PATH)/VERSION
 sphinxdocs: $(MANUAL_BUILDDIR)/devel/index.html $(MANUAL_BUILDDIR)/interop/index.html
 
 # Canned command to build a single manual
-build-manual = $(call quiet-command,sphinx-build $(if $(V),,-q) -b html -D version=$(VERSION) -D release="$(FULL_VERSION)" -d .doctrees/$1 $(SRC_PATH)/docs/$1 $(MANUAL_BUILDDIR)/$1 ,"SPHINX","$(MANUAL_BUILDDIR)/$1")
+build-manual = $(call quiet-command,sphinx-build $(if $(V),,-q) -W -n -b html -D version=$(VERSION) -D release="$(FULL_VERSION)" -d .doctrees/$1 $(SRC_PATH)/docs/$1 $(MANUAL_BUILDDIR)/$1 ,"SPHINX","$(MANUAL_BUILDDIR)/$1")
 # We assume all RST files in the manual's directory are used in it
 manual-deps = $(wildcard $(SRC_PATH)/docs/$1/*.rst) $(SRC_PATH)/docs/$1/conf.py $(SRC_PATH)/docs/conf.py
 
@@ -945,7 +1012,7 @@ qemu-doc.html qemu-doc.info qemu-doc.pdf qemu-doc.txt: \
 	qemu-img.texi qemu-nbd.texi qemu-options.texi qemu-option-trace.texi \
 	qemu-deprecated.texi qemu-monitor.texi qemu-img-cmds.texi qemu-ga.texi \
 	qemu-monitor-info.texi docs/qemu-block-drivers.texi \
-	docs/qemu-cpu-models.texi
+	docs/qemu-cpu-models.texi docs/security.texi
 
 docs/interop/qemu-ga-ref.dvi docs/interop/qemu-ga-ref.html \
     docs/interop/qemu-ga-ref.info docs/interop/qemu-ga-ref.pdf \
@@ -964,7 +1031,9 @@ $(filter %.1 %.7 %.8,$(DOCS)): scripts/texi2pod.pl
 %/coverage-report.html:
 	@mkdir -p $*
 	$(call quiet-command,\
-		gcovr -r $(SRC_PATH) --object-directory $(BUILD_PATH) \
+		gcovr -r $(SRC_PATH) \
+		$(foreach t, $(TARGET_DIRS), --object-directory $(BUILD_DIR)/$(t)) \
+		 --object-directory $(BUILD_DIR) \
 		-p --html --html-details -o $@, \
 		"GEN", "coverage-report.html")
 
@@ -1031,7 +1100,7 @@ endif # CONFIG_WIN
 # rebuilt before other object files
 ifneq ($(wildcard config-host.mak),)
 ifneq ($(filter-out $(UNCHECKED_GOALS),$(MAKECMDGOALS)),$(if $(MAKECMDGOALS),,fail))
-Makefile: $(GENERATED_FILES)
+Makefile: $(generated-files-y)
 endif
 endif
 

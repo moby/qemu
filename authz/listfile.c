@@ -20,7 +20,7 @@
 
 #include "qemu/osdep.h"
 #include "authz/listfile.h"
-#include "authz/trace.h"
+#include "trace.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/sockets.h"
@@ -93,7 +93,7 @@ qauthz_list_file_load(QAuthZListFile *fauthz, Error **errp)
 
 
 static void
-qauthz_list_file_event(int wd G_GNUC_UNUSED,
+qauthz_list_file_event(int64_t wd G_GNUC_UNUSED,
                        QFileMonitorEvent ev G_GNUC_UNUSED,
                        const char *name G_GNUC_UNUSED,
                        void *opaque)

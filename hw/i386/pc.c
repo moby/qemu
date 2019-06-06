@@ -30,6 +30,7 @@
 #include "hw/char/parallel.h"
 #include "hw/i386/apic.h"
 #include "hw/i386/topology.h"
+#include "hw/i386/fw_cfg.h"
 #include "sysemu/cpus.h"
 #include "hw/block/fdc.h"
 #include "hw/ide.h"
@@ -88,12 +89,6 @@
 #define DPRINTF(fmt, ...)
 #endif
 
-#define FW_CFG_ACPI_TABLES (FW_CFG_ARCH_LOCAL + 0)
-#define FW_CFG_SMBIOS_ENTRIES (FW_CFG_ARCH_LOCAL + 1)
-#define FW_CFG_IRQ0_OVERRIDE (FW_CFG_ARCH_LOCAL + 2)
-#define FW_CFG_E820_TABLE (FW_CFG_ARCH_LOCAL + 3)
-#define FW_CFG_HPET (FW_CFG_ARCH_LOCAL + 4)
-
 #define E820_NR_ENTRIES		16
 
 struct e820_entry {
@@ -114,6 +109,12 @@ struct hpet_fw_config hpet_cfg = {.count = UINT8_MAX};
 
 /* Physical Address of PVH entry point read from kernel ELF NOTE */
 static size_t pvh_start_addr;
+
+GlobalProperty pc_compat_4_0_1[] = {};
+const size_t pc_compat_4_0_1_len = G_N_ELEMENTS(pc_compat_4_0_1);
+
+GlobalProperty pc_compat_4_0[] = {};
+const size_t pc_compat_4_0_len = G_N_ELEMENTS(pc_compat_4_0);
 
 GlobalProperty pc_compat_3_1[] = {
     { "intel-iommu", "dma-drain", "off" },
@@ -2078,6 +2079,7 @@ static void pc_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
     const MachineState *ms = MACHINE(hotplug_dev);
     const bool is_nvdimm = object_dynamic_cast(OBJECT(dev), TYPE_NVDIMM);
     const uint64_t legacy_align = TARGET_PAGE_SIZE;
+    Error *local_err = NULL;
 
     /*
      * When -no-acpi is used with Q35 machine type, no ACPI is built,
@@ -2090,10 +2092,14 @@ static void pc_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
         return;
     }
 
-    hotplug_handler_pre_plug(pcms->acpi_dev, dev, errp);
-
     if (is_nvdimm && !ms->nvdimms_state->is_enabled) {
         error_setg(errp, "nvdimm is not enabled: missing 'nvdimm' in '-M'");
+        return;
+    }
+
+    hotplug_handler_pre_plug(pcms->acpi_dev, dev, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
 

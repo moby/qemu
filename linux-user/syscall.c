@@ -59,9 +59,6 @@
 #ifdef CONFIG_TIMERFD
 #include <sys/timerfd.h>
 #endif
-#ifdef TARGET_GPROF
-#include <sys/gmon.h>
-#endif
 #ifdef CONFIG_EVENTFD
 #include <sys/eventfd.h>
 #endif
@@ -110,6 +107,8 @@
 #include "uname.h"
 
 #include "qemu.h"
+#include "qemu/guest-random.h"
+#include "qapi/error.h"
 #include "fd-trans.h"
 
 #ifndef CLONE_IO
@@ -249,15 +248,8 @@ static type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5,	\
 #define TARGET_NR__llseek TARGET_NR_llseek
 #endif
 
-#ifdef __NR_gettid
-_syscall0(int, gettid)
-#else
-/* This is a replacement for the host gettid() and must return a host
-   errno. */
-static int gettid(void) {
-    return -ENOSYS;
-}
-#endif
+#define __NR_sys_gettid __NR_gettid
+_syscall0(int, sys_gettid)
 
 /* For the 64-bit guest on 32-bit host case we must emulate
  * getdents using getdents64, because otherwise the host
@@ -771,14 +763,7 @@ safe_syscall2(int, nanosleep, const struct timespec *, req,
 safe_syscall4(int, clock_nanosleep, const clockid_t, clock, int, flags,
               const struct timespec *, req, struct timespec *, rem)
 #endif
-#ifdef __NR_msgsnd
-safe_syscall4(int, msgsnd, int, msgid, const void *, msgp, size_t, sz,
-              int, flags)
-safe_syscall5(int, msgrcv, int, msgid, void *, msgp, size_t, sz,
-              long, msgtype, int, flags)
-safe_syscall4(int, semtimedop, int, semid, struct sembuf *, tsops,
-              unsigned, nsops, const struct timespec *, timeout)
-#else
+#if !defined(__NR_msgsnd) || !defined(__NR_msgrcv) || !defined(__NR_semtimedop)
 /* This host kernel architecture uses a single ipc syscall; fake up
  * wrappers for the sub-operations to hide this implementation detail.
  * Annoyingly we can't include linux/ipc.h to get the constant definitions
@@ -793,14 +778,29 @@ safe_syscall4(int, semtimedop, int, semid, struct sembuf *, tsops,
 
 safe_syscall6(int, ipc, int, call, long, first, long, second, long, third,
               void *, ptr, long, fifth)
+#endif
+#ifdef __NR_msgsnd
+safe_syscall4(int, msgsnd, int, msgid, const void *, msgp, size_t, sz,
+              int, flags)
+#else
 static int safe_msgsnd(int msgid, const void *msgp, size_t sz, int flags)
 {
     return safe_ipc(Q_IPCCALL(0, Q_MSGSND), msgid, sz, flags, (void *)msgp, 0);
 }
+#endif
+#ifdef __NR_msgrcv
+safe_syscall5(int, msgrcv, int, msgid, void *, msgp, size_t, sz,
+              long, msgtype, int, flags)
+#else
 static int safe_msgrcv(int msgid, void *msgp, size_t sz, long type, int flags)
 {
     return safe_ipc(Q_IPCCALL(1, Q_MSGRCV), msgid, sz, flags, msgp, type);
 }
+#endif
+#ifdef __NR_semtimedop
+safe_syscall4(int, semtimedop, int, semid, struct sembuf *, tsops,
+              unsigned, nsops, const struct timespec *, timeout)
+#else
 static int safe_semtimedop(int semid, struct sembuf *tsops, unsigned nsops,
                            const struct timespec *timeout)
 {
@@ -1871,6 +1871,28 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
         case IPV6_RECVHOPLIMIT:
         case IPV6_2292HOPLIMIT:
         case IPV6_CHECKSUM:
+        case IPV6_ADDRFORM:
+        case IPV6_2292PKTINFO:
+        case IPV6_RECVTCLASS:
+        case IPV6_RECVRTHDR:
+        case IPV6_2292RTHDR:
+        case IPV6_RECVHOPOPTS:
+        case IPV6_2292HOPOPTS:
+        case IPV6_RECVDSTOPTS:
+        case IPV6_2292DSTOPTS:
+        case IPV6_TCLASS:
+#ifdef IPV6_RECVPATHMTU
+        case IPV6_RECVPATHMTU:
+#endif
+#ifdef IPV6_TRANSPARENT
+        case IPV6_TRANSPARENT:
+#endif
+#ifdef IPV6_FREEBIND
+        case IPV6_FREEBIND:
+#endif
+#ifdef IPV6_RECVORIGDSTADDR
+        case IPV6_RECVORIGDSTADDR:
+#endif
             val = 0;
             if (optlen < sizeof(uint32_t)) {
                 return -TARGET_EINVAL;
@@ -2365,6 +2387,28 @@ static abi_long do_getsockopt(int sockfd, int level, int optname,
         case IPV6_RECVHOPLIMIT:
         case IPV6_2292HOPLIMIT:
         case IPV6_CHECKSUM:
+        case IPV6_ADDRFORM:
+        case IPV6_2292PKTINFO:
+        case IPV6_RECVTCLASS:
+        case IPV6_RECVRTHDR:
+        case IPV6_2292RTHDR:
+        case IPV6_RECVHOPOPTS:
+        case IPV6_2292HOPOPTS:
+        case IPV6_RECVDSTOPTS:
+        case IPV6_2292DSTOPTS:
+        case IPV6_TCLASS:
+#ifdef IPV6_RECVPATHMTU
+        case IPV6_RECVPATHMTU:
+#endif
+#ifdef IPV6_TRANSPARENT
+        case IPV6_TRANSPARENT:
+#endif
+#ifdef IPV6_FREEBIND
+        case IPV6_FREEBIND:
+#endif
+#ifdef IPV6_RECVORIGDSTADDR
+        case IPV6_RECVORIGDSTADDR:
+#endif
             if (get_user_u32(len, optlen))
                 return -TARGET_EFAULT;
             if (len < 0)
@@ -3878,7 +3922,8 @@ static inline abi_ulong do_shmat(CPUArchState *cpu_env,
     else {
         abi_ulong mmap_start;
 
-        mmap_start = mmap_find_vma(0, shm_info.shm_segsz);
+        /* In order to use the host shmat, we need to honor host SHMLBA.  */
+        mmap_start = mmap_find_vma(0, shm_info.shm_segsz, MAX(SHMLBA, shmlba));
 
         if (mmap_start == -1) {
             errno = ENOMEM;
@@ -5442,12 +5487,13 @@ static void *clone_func(void *arg)
     cpu = ENV_GET_CPU(env);
     thread_cpu = cpu;
     ts = (TaskState *)cpu->opaque;
-    info->tid = gettid();
+    info->tid = sys_gettid();
     task_settid(ts);
     if (info->child_tidptr)
         put_user_u32(info->tid, info->child_tidptr);
     if (info->parent_tidptr)
         put_user_u32(info->tid, info->parent_tidptr);
+    qemu_guest_random_seed_thread_part2(cpu->random_seed);
     /* Enable signals.  */
     sigprocmask(SIG_SETMASK, &info->sigmask, NULL);
     /* Signal to the parent that we're ready.  */
@@ -5534,6 +5580,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
            initializing, so temporarily block all signals.  */
         sigfillset(&sigmask);
         sigprocmask(SIG_BLOCK, &sigmask, &info.sigmask);
+        cpu->random_seed = qemu_guest_random_seed_thread_part1();
 
         /* If this is our first additional thread, we need to ensure we
          * generate code for parallel execution and flush old translations.
@@ -5587,9 +5634,9 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
                mapping.  We can't repeat the spinlock hack used above because
                the child process gets its own copy of the lock.  */
             if (flags & CLONE_CHILD_SETTID)
-                put_user_u32(gettid(), child_tidptr);
+                put_user_u32(sys_gettid(), child_tidptr);
             if (flags & CLONE_PARENT_SETTID)
-                put_user_u32(gettid(), parent_tidptr);
+                put_user_u32(sys_gettid(), parent_tidptr);
             ts = (TaskState *)cpu->opaque;
             if (flags & CLONE_SETTLS)
                 cpu_set_tls (env, newtls);
@@ -6374,6 +6421,11 @@ static inline abi_long host_to_target_stat64(void *cpu_env,
         __put_user(host_st->st_atime, &target_st->target_st_atime);
         __put_user(host_st->st_mtime, &target_st->target_st_mtime);
         __put_user(host_st->st_ctime, &target_st->target_st_ctime);
+#if _POSIX_C_SOURCE >= 200809L || _XOPEN_SOURCE >= 700
+        __put_user(host_st->st_atim.tv_nsec, &target_st->target_st_atime_nsec);
+        __put_user(host_st->st_mtim.tv_nsec, &target_st->target_st_mtime_nsec);
+        __put_user(host_st->st_ctim.tv_nsec, &target_st->target_st_ctime_nsec);
+#endif
         unlock_user_struct(target_st, target_addr, 1);
     } else
 #endif
@@ -6404,6 +6456,11 @@ static inline abi_long host_to_target_stat64(void *cpu_env,
         __put_user(host_st->st_atime, &target_st->target_st_atime);
         __put_user(host_st->st_mtime, &target_st->target_st_mtime);
         __put_user(host_st->st_ctime, &target_st->target_st_ctime);
+#if _POSIX_C_SOURCE >= 200809L || _XOPEN_SOURCE >= 700
+        __put_user(host_st->st_atim.tv_nsec, &target_st->target_st_atime_nsec);
+        __put_user(host_st->st_mtim.tv_nsec, &target_st->target_st_mtime_nsec);
+        __put_user(host_st->st_ctim.tv_nsec, &target_st->target_st_ctime_nsec);
+#endif
         unlock_user_struct(target_st, target_addr, 1);
     }
 
@@ -6752,12 +6809,15 @@ static int is_proc_myself(const char *filename, const char *entry)
     return 0;
 }
 
-#if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
+#if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN) || \
+    defined(TARGET_SPARC) || defined(TARGET_M68K)
 static int is_proc(const char *filename, const char *entry)
 {
     return strcmp(filename, entry) == 0;
 }
+#endif
 
+#if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
 static int open_net_route(void *cpu_env, int fd)
 {
     FILE *fp;
@@ -6802,6 +6862,22 @@ static int open_net_route(void *cpu_env, int fd)
 }
 #endif
 
+#if defined(TARGET_SPARC)
+static int open_cpuinfo(void *cpu_env, int fd)
+{
+    dprintf(fd, "type\t\t: sun4u\n");
+    return 0;
+}
+#endif
+
+#if defined(TARGET_M68K)
+static int open_hardware(void *cpu_env, int fd)
+{
+    dprintf(fd, "Model:\t\tqemu-m68k\n");
+    return 0;
+}
+#endif
+
 static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, mode_t mode)
 {
     struct fake_open {
@@ -6817,6 +6893,12 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
         { "cmdline", open_self_cmdline, is_proc_myself },
 #if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
         { "/proc/net/route", open_net_route, is_proc },
+#endif
+#if defined(TARGET_SPARC)
+        { "/proc/cpuinfo", open_cpuinfo, is_proc },
+#endif
+#if defined(TARGET_M68K)
+        { "/proc/hardware", open_hardware, is_proc },
 #endif
         { NULL, NULL, NULL }
     };
@@ -8832,6 +8914,15 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 __put_user(st.st_atime, &target_st->target_st_atime);
                 __put_user(st.st_mtime, &target_st->target_st_mtime);
                 __put_user(st.st_ctime, &target_st->target_st_ctime);
+#if (_POSIX_C_SOURCE >= 200809L || _XOPEN_SOURCE >= 700) && \
+    defined(TARGET_STAT_HAVE_NSEC)
+                __put_user(st.st_atim.tv_nsec,
+                           &target_st->target_st_atime_nsec);
+                __put_user(st.st_mtim.tv_nsec,
+                           &target_st->target_st_mtime_nsec);
+                __put_user(st.st_ctim.tv_nsec,
+                           &target_st->target_st_ctime_nsec);
+#endif
                 unlock_user_struct(target_st, arg2, 1);
             }
         }
@@ -9728,25 +9819,45 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                     int all = (TARGET_PR_PAC_APIAKEY | TARGET_PR_PAC_APIBKEY |
                                TARGET_PR_PAC_APDAKEY | TARGET_PR_PAC_APDBKEY |
                                TARGET_PR_PAC_APGAKEY);
+                    int ret = 0;
+                    Error *err = NULL;
+
                     if (arg2 == 0) {
                         arg2 = all;
                     } else if (arg2 & ~all) {
                         return -TARGET_EINVAL;
                     }
                     if (arg2 & TARGET_PR_PAC_APIAKEY) {
-                        arm_init_pauth_key(&env->apia_key);
+                        ret |= qemu_guest_getrandom(&env->keys.apia,
+                                                    sizeof(ARMPACKey), &err);
                     }
                     if (arg2 & TARGET_PR_PAC_APIBKEY) {
-                        arm_init_pauth_key(&env->apib_key);
+                        ret |= qemu_guest_getrandom(&env->keys.apib,
+                                                    sizeof(ARMPACKey), &err);
                     }
                     if (arg2 & TARGET_PR_PAC_APDAKEY) {
-                        arm_init_pauth_key(&env->apda_key);
+                        ret |= qemu_guest_getrandom(&env->keys.apda,
+                                                    sizeof(ARMPACKey), &err);
                     }
                     if (arg2 & TARGET_PR_PAC_APDBKEY) {
-                        arm_init_pauth_key(&env->apdb_key);
+                        ret |= qemu_guest_getrandom(&env->keys.apdb,
+                                                    sizeof(ARMPACKey), &err);
                     }
                     if (arg2 & TARGET_PR_PAC_APGAKEY) {
-                        arm_init_pauth_key(&env->apga_key);
+                        ret |= qemu_guest_getrandom(&env->keys.apga,
+                                                    sizeof(ARMPACKey), &err);
+                    }
+                    if (ret != 0) {
+                        /*
+                         * Some unknown failure in the crypto.  The best
+                         * we can do is log it and fail the syscall.
+                         * The real syscall cannot fail this way.
+                         */
+                        qemu_log_mask(LOG_UNIMP,
+                                      "PR_PAC_RESET_KEYS: Crypto failure: %s",
+                                      error_get_pretty(err));
+                        error_free(err);
+                        return -TARGET_EIO;
                     }
                     return 0;
                 }
@@ -10189,18 +10300,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         switch (arg1) {
           case TARGET_GSI_IEEE_FP_CONTROL:
             {
-                uint64_t swcr, fpcr = cpu_alpha_load_fpcr (cpu_env);
+                uint64_t fpcr = cpu_alpha_load_fpcr(cpu_env);
+                uint64_t swcr = ((CPUAlphaState *)cpu_env)->swcr;
 
-                /* Copied from linux ieee_fpcr_to_swcr.  */
-                swcr = (fpcr >> 35) & SWCR_STATUS_MASK;
-                swcr |= (fpcr >> 36) & SWCR_MAP_DMZ;
-                swcr |= (~fpcr >> 48) & (SWCR_TRAP_ENABLE_INV
-                                        | SWCR_TRAP_ENABLE_DZE
-                                        | SWCR_TRAP_ENABLE_OVF);
-                swcr |= (~fpcr >> 57) & (SWCR_TRAP_ENABLE_UNF
-                                        | SWCR_TRAP_ENABLE_INE);
-                swcr |= (fpcr >> 47) & SWCR_MAP_UMZ;
-                swcr |= (~fpcr >> 41) & SWCR_TRAP_ENABLE_DNO;
+                swcr &= ~SWCR_STATUS_MASK;
+                swcr |= (fpcr >> 35) & SWCR_STATUS_MASK;
 
                 if (put_user_u64 (swcr, arg2))
                         return -TARGET_EFAULT;
@@ -10227,25 +10331,24 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         switch (arg1) {
           case TARGET_SSI_IEEE_FP_CONTROL:
             {
-                uint64_t swcr, fpcr, orig_fpcr;
+                uint64_t swcr, fpcr;
 
                 if (get_user_u64 (swcr, arg2)) {
                     return -TARGET_EFAULT;
                 }
-                orig_fpcr = cpu_alpha_load_fpcr(cpu_env);
-                fpcr = orig_fpcr & FPCR_DYN_MASK;
 
-                /* Copied from linux ieee_swcr_to_fpcr.  */
-                fpcr |= (swcr & SWCR_STATUS_MASK) << 35;
-                fpcr |= (swcr & SWCR_MAP_DMZ) << 36;
-                fpcr |= (~swcr & (SWCR_TRAP_ENABLE_INV
-                                  | SWCR_TRAP_ENABLE_DZE
-                                  | SWCR_TRAP_ENABLE_OVF)) << 48;
-                fpcr |= (~swcr & (SWCR_TRAP_ENABLE_UNF
-                                  | SWCR_TRAP_ENABLE_INE)) << 57;
-                fpcr |= (swcr & SWCR_MAP_UMZ ? FPCR_UNDZ | FPCR_UNFD : 0);
-                fpcr |= (~swcr & SWCR_TRAP_ENABLE_DNO) << 41;
+                /*
+                 * The kernel calls swcr_update_status to update the
+                 * status bits from the fpcr at every point that it
+                 * could be queried.  Therefore, we store the status
+                 * bits only in FPCR.
+                 */
+                ((CPUAlphaState *)cpu_env)->swcr
+                    = swcr & (SWCR_TRAP_ENABLE_MASK | SWCR_MAP_MASK);
 
+                fpcr = cpu_alpha_load_fpcr(cpu_env);
+                fpcr &= ((uint64_t)FPCR_DYN_MASK << 32);
+                fpcr |= alpha_ieee_swcr_to_fpcr(swcr);
                 cpu_alpha_store_fpcr(cpu_env, fpcr);
                 ret = 0;
             }
@@ -10253,44 +10356,47 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
           case TARGET_SSI_IEEE_RAISE_EXCEPTION:
             {
-                uint64_t exc, fpcr, orig_fpcr;
-                int si_code;
+                uint64_t exc, fpcr, fex;
 
                 if (get_user_u64(exc, arg2)) {
                     return -TARGET_EFAULT;
                 }
-
-                orig_fpcr = cpu_alpha_load_fpcr(cpu_env);
-
-                /* We only add to the exception status here.  */
-                fpcr = orig_fpcr | ((exc & SWCR_STATUS_MASK) << 35);
-
-                cpu_alpha_store_fpcr(cpu_env, fpcr);
-                ret = 0;
+                exc &= SWCR_STATUS_MASK;
+                fpcr = cpu_alpha_load_fpcr(cpu_env);
 
                 /* Old exceptions are not signaled.  */
-                fpcr &= ~(orig_fpcr & FPCR_STATUS_MASK);
+                fex = alpha_ieee_fpcr_to_swcr(fpcr);
+                fex = exc & ~fex;
+                fex >>= SWCR_STATUS_TO_EXCSUM_SHIFT;
+                fex &= ((CPUArchState *)cpu_env)->swcr;
 
-                /* If any exceptions set by this call,
-                   and are unmasked, send a signal.  */
-                si_code = 0;
-                if ((fpcr & (FPCR_INE | FPCR_INED)) == FPCR_INE) {
-                    si_code = TARGET_FPE_FLTRES;
-                }
-                if ((fpcr & (FPCR_UNF | FPCR_UNFD)) == FPCR_UNF) {
-                    si_code = TARGET_FPE_FLTUND;
-                }
-                if ((fpcr & (FPCR_OVF | FPCR_OVFD)) == FPCR_OVF) {
-                    si_code = TARGET_FPE_FLTOVF;
-                }
-                if ((fpcr & (FPCR_DZE | FPCR_DZED)) == FPCR_DZE) {
-                    si_code = TARGET_FPE_FLTDIV;
-                }
-                if ((fpcr & (FPCR_INV | FPCR_INVD)) == FPCR_INV) {
-                    si_code = TARGET_FPE_FLTINV;
-                }
-                if (si_code != 0) {
+                /* Update the hardware fpcr.  */
+                fpcr |= alpha_ieee_swcr_to_fpcr(exc);
+                cpu_alpha_store_fpcr(cpu_env, fpcr);
+
+                if (fex) {
+                    int si_code = TARGET_FPE_FLTUNK;
                     target_siginfo_t info;
+
+                    if (fex & SWCR_TRAP_ENABLE_DNO) {
+                        si_code = TARGET_FPE_FLTUND;
+                    }
+                    if (fex & SWCR_TRAP_ENABLE_INE) {
+                        si_code = TARGET_FPE_FLTRES;
+                    }
+                    if (fex & SWCR_TRAP_ENABLE_UNF) {
+                        si_code = TARGET_FPE_FLTUND;
+                    }
+                    if (fex & SWCR_TRAP_ENABLE_OVF) {
+                        si_code = TARGET_FPE_FLTOVF;
+                    }
+                    if (fex & SWCR_TRAP_ENABLE_DZE) {
+                        si_code = TARGET_FPE_FLTDIV;
+                    }
+                    if (fex & SWCR_TRAP_ENABLE_INV) {
+                        si_code = TARGET_FPE_FLTINV;
+                    }
+
                     info.si_signo = SIGFPE;
                     info.si_errno = 0;
                     info.si_code = si_code;
@@ -10299,6 +10405,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                     queue_signal((CPUArchState *)cpu_env, info.si_signo,
                                  QEMU_SI_FAULT, &info);
                 }
+                ret = 0;
             }
             break;
 
@@ -10629,7 +10736,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return TARGET_PAGE_SIZE;
 #endif
     case TARGET_NR_gettid:
-        return get_errno(gettid());
+        return get_errno(sys_gettid());
 #ifdef TARGET_NR_readahead
     case TARGET_NR_readahead:
 #if TARGET_ABI_BITS == 32

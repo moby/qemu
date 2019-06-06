@@ -40,6 +40,7 @@
 #include "monitor/monitor.h"
 #include "qemu/error-report.h"
 #include "qemu/option.h"
+#include "qemu/qemu-print.h"
 #include "qemu/config-file.h"
 #include "qapi/qapi-commands-block.h"
 #include "qapi/qapi-commands-transaction.h"
@@ -301,7 +302,7 @@ DriveInfo *drive_get_next(BlockInterfaceType type)
 
 static void bdrv_format_print(void *opaque, const char *name)
 {
-    error_printf(" %s", name);
+    qemu_printf(" %s", name);
 }
 
 typedef struct {
@@ -530,11 +531,11 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
 
     if ((buf = qemu_opt_get(opts, "format")) != NULL) {
         if (is_help_option(buf)) {
-            error_printf("Supported formats:");
+            qemu_printf("Supported formats:");
             bdrv_iterate_format(bdrv_format_print, NULL, false);
-            error_printf("\nSupported formats (read-only):");
+            qemu_printf("\nSupported formats (read-only):");
             bdrv_iterate_format(bdrv_format_print, NULL, true);
-            error_printf("\n");
+            qemu_printf("\n");
             goto early_err;
         }
 
@@ -573,7 +574,7 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
     if ((!file || !*file) && !qdict_size(bs_opts)) {
         BlockBackendRootState *blk_rs;
 
-        blk = blk_new(0, BLK_PERM_ALL);
+        blk = blk_new(qemu_get_aio_context(), 0, BLK_PERM_ALL);
         blk_rs = blk_get_root_state(blk);
         blk_rs->open_flags    = bdrv_flags;
         blk_rs->read_only     = read_only;
@@ -1534,6 +1535,7 @@ static void external_snapshot_prepare(BlkActionState *common,
                              DO_UPCAST(ExternalSnapshotState, common, common);
     TransactionAction *action = common->action;
     AioContext *aio_context;
+    int ret;
 
     /* 'blockdev-snapshot' and 'blockdev-snapshot-sync' have similar
      * purpose but a different set of parameters */
@@ -1673,7 +1675,10 @@ static void external_snapshot_prepare(BlkActionState *common,
         goto out;
     }
 
-    bdrv_set_aio_context(state->new_bs, aio_context);
+    ret = bdrv_try_set_aio_context(state->new_bs, aio_context, errp);
+    if (ret < 0) {
+        goto out;
+    }
 
     /* This removes our old bs and adds the new bs. This is an operation that
      * can fail, so we need to do it in .prepare; undoing it for abort is
@@ -2111,11 +2116,10 @@ static void block_dirty_bitmap_disable_abort(BlkActionState *common)
     }
 }
 
-static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
-                                                    const char *target,
-                                                    strList *bitmaps,
-                                                    HBitmap **backup,
-                                                    Error **errp);
+static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(
+        const char *node, const char *target,
+        BlockDirtyBitmapMergeSourceList *bitmaps,
+        HBitmap **backup, Error **errp);
 
 static void block_dirty_bitmap_merge_prepare(BlkActionState *common,
                                              Error **errp)
@@ -2964,15 +2968,14 @@ void qmp_block_dirty_bitmap_disable(const char *node, const char *name,
     bdrv_disable_dirty_bitmap(bitmap);
 }
 
-static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
-                                                    const char *target,
-                                                    strList *bitmaps,
-                                                    HBitmap **backup,
-                                                    Error **errp)
+static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(
+        const char *node, const char *target,
+        BlockDirtyBitmapMergeSourceList *bitmaps,
+        HBitmap **backup, Error **errp)
 {
     BlockDriverState *bs;
     BdrvDirtyBitmap *dst, *src, *anon;
-    strList *lst;
+    BlockDirtyBitmapMergeSourceList *lst;
     Error *local_err = NULL;
 
     dst = block_dirty_bitmap_lookup(node, target, &bs, errp);
@@ -2987,11 +2990,28 @@ static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
     }
 
     for (lst = bitmaps; lst; lst = lst->next) {
-        src = bdrv_find_dirty_bitmap(bs, lst->value);
-        if (!src) {
-            error_setg(errp, "Dirty bitmap '%s' not found", lst->value);
-            dst = NULL;
-            goto out;
+        switch (lst->value->type) {
+            const char *name, *node;
+        case QTYPE_QSTRING:
+            name = lst->value->u.local;
+            src = bdrv_find_dirty_bitmap(bs, name);
+            if (!src) {
+                error_setg(errp, "Dirty bitmap '%s' not found", name);
+                dst = NULL;
+                goto out;
+            }
+            break;
+        case QTYPE_QDICT:
+            node = lst->value->u.external.node;
+            name = lst->value->u.external.name;
+            src = block_dirty_bitmap_lookup(node, name, NULL, errp);
+            if (!src) {
+                dst = NULL;
+                goto out;
+            }
+            break;
+        default:
+            abort();
         }
 
         bdrv_merge_dirty_bitmap(anon, src, NULL, &local_err);
@@ -3011,7 +3031,8 @@ static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
 }
 
 void qmp_block_dirty_bitmap_merge(const char *node, const char *target,
-                                  strList *bitmaps, Error **errp)
+                                  BlockDirtyBitmapMergeSourceList *bitmaps,
+                                  Error **errp)
 {
     do_block_dirty_bitmap_merge(node, target, bitmaps, NULL, errp);
 }
@@ -3137,7 +3158,7 @@ void qmp_block_resize(bool has_device, const char *device,
         goto out;
     }
 
-    blk = blk_new(BLK_PERM_RESIZE, BLK_PERM_ALL);
+    blk = blk_new(bdrv_get_aio_context(bs), BLK_PERM_RESIZE, BLK_PERM_ALL);
     ret = blk_insert_bs(blk, bs, errp);
     if (ret < 0) {
         goto out;
@@ -3423,6 +3444,7 @@ static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
     int flags, job_flags = JOB_DEFAULT;
     int64_t size;
     bool set_backing_hd = false;
+    int ret;
 
     if (!backup->has_speed) {
         backup->speed = 0;
@@ -3449,8 +3471,13 @@ static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
         backup->compress = false;
     }
 
-    bs = qmp_get_root_bs(backup->device, errp);
+    bs = bdrv_lookup_bs(backup->device, backup->device, errp);
     if (!bs) {
+        return NULL;
+    }
+
+    if (!bs->drv) {
+        error_setg(errp, "Device has no medium");
         return NULL;
     }
 
@@ -3519,13 +3546,16 @@ static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
         goto out;
     }
 
-    bdrv_set_aio_context(target_bs, aio_context);
+    ret = bdrv_try_set_aio_context(target_bs, aio_context, errp);
+    if (ret < 0) {
+        bdrv_unref(target_bs);
+        goto out;
+    }
 
     if (set_backing_hd) {
         bdrv_set_backing_hd(target_bs, source, &local_err);
         if (local_err) {
-            bdrv_unref(target_bs);
-            goto out;
+            goto unref;
         }
     }
 
@@ -3533,11 +3563,10 @@ static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
         bmap = bdrv_find_dirty_bitmap(bs, backup->bitmap);
         if (!bmap) {
             error_setg(errp, "Bitmap '%s' could not be found", backup->bitmap);
-            bdrv_unref(target_bs);
-            goto out;
+            goto unref;
         }
         if (bdrv_dirty_bitmap_check(bmap, BDRV_BITMAP_DEFAULT, errp)) {
-            goto out;
+            goto unref;
         }
     }
     if (!backup->auto_finalize) {
@@ -3551,12 +3580,13 @@ static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
                             backup->sync, bmap, backup->compress,
                             backup->on_source_error, backup->on_target_error,
                             job_flags, NULL, NULL, txn, &local_err);
-    bdrv_unref(target_bs);
     if (local_err != NULL) {
         error_propagate(errp, local_err);
-        goto out;
+        goto unref;
     }
 
+unref:
+    bdrv_unref(target_bs);
 out:
     aio_context_release(aio_context);
     return job;
@@ -3592,6 +3622,7 @@ BlockJob *do_blockdev_backup(BlockdevBackup *backup, JobTxn *txn,
     AioContext *aio_context;
     BlockJob *job = NULL;
     int job_flags = JOB_DEFAULT;
+    int ret;
 
     if (!backup->has_speed) {
         backup->speed = 0;
@@ -3628,16 +3659,9 @@ BlockJob *do_blockdev_backup(BlockdevBackup *backup, JobTxn *txn,
         goto out;
     }
 
-    if (bdrv_get_aio_context(target_bs) != aio_context) {
-        if (!bdrv_has_blk(target_bs)) {
-            /* The target BDS is not attached, we can safely move it to another
-             * AioContext. */
-            bdrv_set_aio_context(target_bs, aio_context);
-        } else {
-            error_setg(errp, "Target is attached to a different thread from "
-                             "source.");
-            goto out;
-        }
+    ret = bdrv_try_set_aio_context(target_bs, aio_context, errp);
+    if (ret < 0) {
+        goto out;
     }
 
     if (backup->has_bitmap) {
@@ -3756,6 +3780,39 @@ static void blockdev_mirror_common(const char *job_id, BlockDriverState *bs,
         sync = MIRROR_SYNC_MODE_FULL;
     }
 
+    if (has_replaces) {
+        BlockDriverState *to_replace_bs;
+        AioContext *replace_aio_context;
+        int64_t bs_size, replace_size;
+
+        bs_size = bdrv_getlength(bs);
+        if (bs_size < 0) {
+            error_setg_errno(errp, -bs_size, "Failed to query device's size");
+            return;
+        }
+
+        to_replace_bs = check_to_replace_node(bs, replaces, errp);
+        if (!to_replace_bs) {
+            return;
+        }
+
+        replace_aio_context = bdrv_get_aio_context(to_replace_bs);
+        aio_context_acquire(replace_aio_context);
+        replace_size = bdrv_getlength(to_replace_bs);
+        aio_context_release(replace_aio_context);
+
+        if (replace_size < 0) {
+            error_setg_errno(errp, -replace_size,
+                             "Failed to query the replacement node's size");
+            return;
+        }
+        if (bs_size != replace_size) {
+            error_setg(errp, "cannot replace image with a mirror image of "
+                             "different size");
+            return;
+        }
+    }
+
     /* pass the node name to replace to mirror start since it's loose coupling
      * and will allow to check whether the node still exist at mirror completion
      */
@@ -3777,6 +3834,7 @@ void qmp_drive_mirror(DriveMirror *arg, Error **errp)
     int flags;
     int64_t size;
     const char *format = arg->format;
+    int ret;
 
     bs = qmp_get_root_bs(arg->device, errp);
     if (!bs) {
@@ -3816,31 +3874,9 @@ void qmp_drive_mirror(DriveMirror *arg, Error **errp)
     }
 
     if (arg->has_replaces) {
-        BlockDriverState *to_replace_bs;
-        AioContext *replace_aio_context;
-        int64_t replace_size;
-
         if (!arg->has_node_name) {
             error_setg(errp, "a node-name must be provided when replacing a"
                              " named node of the graph");
-            goto out;
-        }
-
-        to_replace_bs = check_to_replace_node(bs, arg->replaces, &local_err);
-
-        if (!to_replace_bs) {
-            error_propagate(errp, local_err);
-            goto out;
-        }
-
-        replace_aio_context = bdrv_get_aio_context(to_replace_bs);
-        aio_context_acquire(replace_aio_context);
-        replace_size = bdrv_getlength(to_replace_bs);
-        aio_context_release(replace_aio_context);
-
-        if (size != replace_size) {
-            error_setg(errp, "cannot replace image with a mirror image of "
-                             "different size");
             goto out;
         }
     }
@@ -3899,7 +3935,11 @@ void qmp_drive_mirror(DriveMirror *arg, Error **errp)
         goto out;
     }
 
-    bdrv_set_aio_context(target_bs, aio_context);
+    ret = bdrv_try_set_aio_context(target_bs, aio_context, errp);
+    if (ret < 0) {
+        bdrv_unref(target_bs);
+        goto out;
+    }
 
     blockdev_mirror_common(arg->has_job_id ? arg->job_id : NULL, bs, target_bs,
                            arg->has_replaces, arg->replaces, arg->sync,
@@ -3943,6 +3983,7 @@ void qmp_blockdev_mirror(bool has_job_id, const char *job_id,
     AioContext *aio_context;
     BlockMirrorBackingMode backing_mode = MIRROR_LEAVE_BACKING_CHAIN;
     Error *local_err = NULL;
+    int ret;
 
     bs = qmp_get_root_bs(device, errp);
     if (!bs) {
@@ -3957,7 +3998,10 @@ void qmp_blockdev_mirror(bool has_job_id, const char *job_id,
     aio_context = bdrv_get_aio_context(bs);
     aio_context_acquire(aio_context);
 
-    bdrv_set_aio_context(target_bs, aio_context);
+    ret = bdrv_try_set_aio_context(target_bs, aio_context, errp);
+    if (ret < 0) {
+        goto out;
+    }
 
     blockdev_mirror_common(has_job_id ? job_id : NULL, bs, target_bs,
                            has_replaces, replaces, sync, backing_mode,
@@ -3973,7 +4017,7 @@ void qmp_blockdev_mirror(bool has_job_id, const char *job_id,
                            has_auto_dismiss, auto_dismiss,
                            &local_err);
     error_propagate(errp, local_err);
-
+out:
     aio_context_release(aio_context);
 }
 
@@ -4463,7 +4507,7 @@ void qmp_x_blockdev_set_iothread(const char *node_name, StrOrNull *iothread,
     old_context = bdrv_get_aio_context(bs);
     aio_context_acquire(old_context);
 
-    bdrv_set_aio_context(bs, new_context);
+    bdrv_try_set_aio_context(bs, new_context, errp);
 
     aio_context_release(old_context);
 }

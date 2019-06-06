@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef QAUTHZ_SIMPLE_H__
-#define QAUTHZ_SIMPLE_H__
+#ifndef QAUTHZ_SIMPLE_H
+#define QAUTHZ_SIMPLE_H
 
 #include "authz/base.h"
 
@@ -32,8 +32,8 @@
     OBJECT_GET_CLASS(QAuthZSimpleClass, (obj),    \
                       TYPE_QAUTHZ_SIMPLE)
 #define QAUTHZ_SIMPLE(obj) \
-    INTERFACE_CHECK(QAuthZSimple, (obj),          \
-                    TYPE_QAUTHZ_SIMPLE)
+    OBJECT_CHECK(QAuthZSimple, (obj), \
+                 TYPE_QAUTHZ_SIMPLE)
 
 typedef struct QAuthZSimple QAuthZSimple;
 typedef struct QAuthZSimpleClass QAuthZSimpleClass;
@@ -80,5 +80,4 @@ QAuthZSimple *qauthz_simple_new(const char *id,
                                 Error **errp);
 
 
-#endif /* QAUTHZ_SIMPLE_H__ */
-
+#endif /* QAUTHZ_SIMPLE_H */
