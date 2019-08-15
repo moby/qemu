@@ -22,22 +22,11 @@
 
 #include "kvm-consts.h"
 #include "hw/registerfields.h"
-
-#if defined(TARGET_AARCH64)
-  /* AArch64 definitions */
-#  define TARGET_LONG_BITS 64
-#else
-#  define TARGET_LONG_BITS 32
-#endif
+#include "cpu-qom.h"
+#include "exec/cpu-defs.h"
 
 /* ARM processors have a weak memory model */
 #define TCG_GUEST_DEFAULT_MO      (0)
-
-#define CPUArchState struct CPUARMState
-
-#include "qemu-common.h"
-#include "cpu-qom.h"
-#include "exec/cpu-defs.h"
 
 #define EXCP_UDEF            1   /* undefined instruction */
 #define EXCP_SWI             2   /* software interrupt */
@@ -114,7 +103,6 @@ enum {
 #define ARM_CPU_VIRQ 2
 #define ARM_CPU_VFIQ 3
 
-#define NB_MMU_MODES 8
 /* ARM-specific extra insn start words:
  * 1: Conditional execution bits
  * 2: Partial exception syndrome for data aborts
@@ -656,9 +644,7 @@ typedef struct CPUARMState {
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
-    CPU_COMMON
-
-    /* Fields after CPU_COMMON are preserved across CPU reset. */
+    /* Fields after this point are preserved across CPU reset. */
 
     /* Internal CPU feature flags.  */
     uint64_t features;
@@ -732,6 +718,7 @@ struct ARMCPU {
     CPUState parent_obj;
     /*< public >*/
 
+    CPUNegativeOffsetState neg;
     CPUARMState env;
 
     /* Coprocessor information */
@@ -799,6 +786,12 @@ struct ARMCPU {
     bool has_el3;
     /* CPU has PMU (Performance Monitor Unit) */
     bool has_pmu;
+    /* CPU has VFP */
+    bool has_vfp;
+    /* CPU has Neon */
+    bool has_neon;
+    /* CPU has M-profile DSP extension */
+    bool has_dsp;
 
     /* CPU has memory protection unit */
     bool has_mpu;
@@ -924,18 +917,9 @@ struct ARMCPU {
     uint32_t sve_max_vq;
 };
 
-static inline ARMCPU *arm_env_get_cpu(CPUARMState *env)
-{
-    return container_of(env, ARMCPU, env);
-}
-
 void arm_cpu_post_init(Object *obj);
 
 uint64_t arm_cpu_mp_affinity(int idx, uint8_t clustersz);
-
-#define ENV_GET_CPU(e) CPU(arm_env_get_cpu(e))
-
-#define ENV_OFFSET offsetof(ARMCPU, env)
 
 #ifndef CONFIG_USER_ONLY
 extern const struct VMStateDescription vmstate_arm_cpu;
@@ -944,8 +928,6 @@ extern const struct VMStateDescription vmstate_arm_cpu;
 void arm_cpu_do_interrupt(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
 bool arm_cpu_exec_interrupt(CPUState *cpu, int int_req);
-
-void arm_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
 hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
                                          MemTxAttrs *attrs);
@@ -982,7 +964,14 @@ static inline void aarch64_sve_change_el(CPUARMState *env, int o,
 { }
 #endif
 
+#if !defined(CONFIG_TCG)
+static inline target_ulong do_arm_semihosting(CPUARMState *env)
+{
+    g_assert_not_reached();
+}
+#else
 target_ulong do_arm_semihosting(CPUARMState *env);
+#endif
 void aarch64_sync_32_to_64(CPUARMState *env);
 void aarch64_sync_64_to_32(CPUARMState *env);
 
@@ -2639,24 +2628,6 @@ bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync);
 #define ARM_CPUID_TI915T      0x54029152
 #define ARM_CPUID_TI925T      0x54029252
 
-#if defined(CONFIG_USER_ONLY)
-#define TARGET_PAGE_BITS 12
-#else
-/* ARMv7 and later CPUs have 4K pages minimum, but ARMv5 and v6
- * have to support 1K tiny pages.
- */
-#define TARGET_PAGE_BITS_VARY
-#define TARGET_PAGE_BITS_MIN 10
-#endif
-
-#if defined(TARGET_AARCH64)
-#  define TARGET_PHYS_ADDR_SPACE_BITS 48
-#  define TARGET_VIRT_ADDR_SPACE_BITS 48
-#else
-#  define TARGET_PHYS_ADDR_SPACE_BITS 40
-#  define TARGET_VIRT_ADDR_SPACE_BITS 32
-#endif
-
 static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
                                      unsigned int target_el)
 {
@@ -3154,6 +3125,9 @@ static inline bool arm_cpu_data_is_big_endian(CPUARMState *env)
     }
 }
 
+typedef CPUARMState CPUArchState;
+typedef ARMCPU ArchCPU;
+
 #include "exec/cpu-all.h"
 
 /* Bit usage in the TB flags field: bit 31 indicates whether we are
@@ -3406,6 +3380,23 @@ static inline bool isar_feature_aa32_fp16_arith(const ARMISARegisters *id)
      * At which point we can properly set and check MVFR1.FPHP.
      */
     return FIELD_EX64(id->id_aa64pfr0, ID_AA64PFR0, FP) == 1;
+}
+
+static inline bool isar_feature_aa32_fp_d32(const ARMISARegisters *id)
+{
+    /* Return true if D16-D31 are implemented */
+    return FIELD_EX64(id->mvfr0, MVFR0, SIMDREG) >= 2;
+}
+
+static inline bool isar_feature_aa32_fpshvec(const ARMISARegisters *id)
+{
+    return FIELD_EX64(id->mvfr0, MVFR0, FPSHVEC) > 0;
+}
+
+static inline bool isar_feature_aa32_fpdp(const ARMISARegisters *id)
+{
+    /* Return true if CPU supports double precision floating point */
+    return FIELD_EX64(id->mvfr0, MVFR0, FPDP) > 0;
 }
 
 /*

@@ -197,6 +197,7 @@ typedef struct XiveSource {
 
     /* KVM support */
     void            *esb_mmap;
+    MemoryRegion    esb_mmio_kvm;
 
     XiveNotifier    *xive;
 } XiveSource;
@@ -317,7 +318,8 @@ typedef struct XiveTCTX {
     DeviceState parent_obj;
 
     CPUState    *cs;
-    qemu_irq    output;
+    qemu_irq    hv_output;
+    qemu_irq    os_output;
 
     uint8_t     regs[XIVE_TM_RING_COUNT * XIVE_TM_RING_SIZE];
 } XiveTCTX;
@@ -436,5 +438,6 @@ void kvmppc_xive_source_set_irq(void *opaque, int srcno, int val);
 void kvmppc_xive_cpu_connect(XiveTCTX *tctx, Error **errp);
 void kvmppc_xive_cpu_synchronize_state(XiveTCTX *tctx, Error **errp);
 void kvmppc_xive_cpu_get_state(XiveTCTX *tctx, Error **errp);
+void kvmppc_xive_cpu_set_state(XiveTCTX *tctx, Error **errp);
 
 #endif /* PPC_XIVE_H */

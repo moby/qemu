@@ -21,7 +21,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "hw/qdev-properties.h"
 #include "linux-user/syscall_defs.h"
 #include "qemu/qemu-print.h"
@@ -100,11 +100,9 @@ static void tilegx_cpu_realizefn(DeviceState *dev, Error **errp)
 
 static void tilegx_cpu_initfn(Object *obj)
 {
-    CPUState *cs = CPU(obj);
     TileGXCPU *cpu = TILEGX_CPU(obj);
-    CPUTLGState *env = &cpu->env;
 
-    cs->env_ptr = env;
+    cpu_set_cpustate_pointers(cpu);
 }
 
 static void tilegx_cpu_do_interrupt(CPUState *cs)

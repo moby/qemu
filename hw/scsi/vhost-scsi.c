@@ -19,6 +19,7 @@
 #include <sys/ioctl.h>
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qemu/queue.h"
 #include "monitor/monitor.h"
 #include "migration/blocker.h"
@@ -209,7 +210,7 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
         if (err) {
             error_propagate(errp, err);
             error_free(vsc->migration_blocker);
-            goto close_fd;
+            goto free_virtio;
         }
     }
 
@@ -239,6 +240,8 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
         migrate_del_blocker(vsc->migration_blocker);
     }
     g_free(vsc->dev.vqs);
+ free_virtio:
+    virtio_scsi_common_unrealize(dev);
  close_fd:
     close(vhostfd);
     return;
@@ -261,7 +264,7 @@ static void vhost_scsi_unrealize(DeviceState *dev, Error **errp)
     vhost_dev_cleanup(&vsc->dev);
     g_free(vqs);
 
-    virtio_scsi_common_unrealize(dev, errp);
+    virtio_scsi_common_unrealize(dev);
 }
 
 static Property vhost_scsi_properties[] = {

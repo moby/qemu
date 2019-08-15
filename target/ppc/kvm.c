@@ -521,6 +521,11 @@ int kvm_arch_init_vcpu(CPUState *cs)
     return ret;
 }
 
+int kvm_arch_destroy_vcpu(CPUState *cs)
+{
+    return 0;
+}
+
 static void kvm_sw_tlb_put(PowerPCCPU *cpu)
 {
     CPUPPCState *env = &cpu->env;
@@ -1991,9 +1996,8 @@ static int kvmppc_get_dec_bits(void)
 }
 
 static int kvmppc_get_pvinfo(CPUPPCState *env, struct kvm_ppc_pvinfo *pvinfo)
- {
-     PowerPCCPU *cpu = ppc_env_get_cpu(env);
-     CPUState *cs = CPU(cpu);
+{
+    CPUState *cs = env_cpu(env);
 
     if (kvm_vm_check_extension(cs->kvm_state, KVM_CAP_PPC_GET_PVINFO) &&
         !kvm_vm_ioctl(cs->kvm_state, KVM_PPC_GET_PVINFO, pvinfo)) {
@@ -2646,7 +2650,7 @@ int kvmppc_define_rtas_kernel_token(uint32_t token, const char *function)
         return -ENOENT;
     }
 
-    strncpy(args.name, function, sizeof(args.name));
+    strncpy(args.name, function, sizeof(args.name) - 1);
 
     return kvm_vm_ioctl(kvm_state, KVM_PPC_RTAS_DEFINE_TOKEN, &args);
 }
@@ -2938,5 +2942,14 @@ void kvmppc_set_reg_ppc_online(PowerPCCPU *cpu, unsigned int online)
 
     if (kvm_enabled()) {
         kvm_set_one_reg(cs, KVM_REG_PPC_ONLINE, &online);
+    }
+}
+
+void kvmppc_set_reg_tb_offset(PowerPCCPU *cpu, int64_t tb_offset)
+{
+    CPUState *cs = CPU(cpu);
+
+    if (kvm_enabled()) {
+        kvm_set_one_reg(cs, KVM_REG_PPC_TB_OFFSET, &tb_offset);
     }
 }

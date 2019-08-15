@@ -31,12 +31,13 @@
 #ifndef CONFIG_USER_ONLY
 #include "sysemu/sysemu.h"
 #include "hw/s390x/s390_flic.h"
+#include "hw/boards.h"
 #endif
 
 void QEMU_NORETURN tcg_s390_program_interrupt(CPUS390XState *env, uint32_t code,
                                               int ilen, uintptr_t ra)
 {
-    CPUState *cs = CPU(s390_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
     cpu_restore_state(cs, ra, true);
     qemu_log_mask(CPU_LOG_INT, "program interrupt at %#" PRIx64 "\n",
@@ -51,7 +52,7 @@ void QEMU_NORETURN tcg_s390_data_exception(CPUS390XState *env, uint32_t dxc,
     g_assert(dxc <= 0xff);
 #if !defined(CONFIG_USER_ONLY)
     /* Store the DXC into the lowcore */
-    stl_phys(CPU(s390_env_get_cpu(env))->as,
+    stl_phys(env_cpu(env)->as,
              env->psa + offsetof(LowCore, data_exc_code), dxc);
 #endif
 
@@ -60,6 +61,21 @@ void QEMU_NORETURN tcg_s390_data_exception(CPUS390XState *env, uint32_t dxc,
         env->fpc = deposit32(env->fpc, 8, 8, dxc);
     }
     tcg_s390_program_interrupt(env, PGM_DATA, ILEN_AUTO, ra);
+}
+
+void QEMU_NORETURN tcg_s390_vector_exception(CPUS390XState *env, uint32_t vxc,
+                                             uintptr_t ra)
+{
+    g_assert(vxc <= 0xff);
+#if !defined(CONFIG_USER_ONLY)
+    /* Always store the VXC into the lowcore, without AFP it is undefined */
+    stl_phys(env_cpu(env)->as,
+             env->psa + offsetof(LowCore, data_exc_code), vxc);
+#endif
+
+    /* Always store the VXC into the FPC, without AFP it is undefined */
+    env->fpc = deposit32(env->fpc, 8, 8, vxc);
+    tcg_s390_program_interrupt(env, PGM_VECTOR_PROCESSING, ILEN_AUTO, ra);
 }
 
 void HELPER(data_exception)(CPUS390XState *env, uint32_t dxc)
@@ -282,7 +298,7 @@ static void do_svc_interrupt(CPUS390XState *env)
 static void do_ext_interrupt(CPUS390XState *env)
 {
     QEMUS390FLICState *flic = QEMU_S390_FLIC(s390_get_flic());
-    S390CPU *cpu = s390_env_get_cpu(env);
+    S390CPU *cpu = env_archcpu(env);
     uint64_t mask, addr;
     uint16_t cpu_addr;
     LowCore *lowcore;
@@ -300,6 +316,10 @@ static void do_ext_interrupt(CPUS390XState *env)
         g_assert(cpu_addr < S390_MAX_CPUS);
         lowcore->cpu_addr = cpu_to_be16(cpu_addr);
         clear_bit(cpu_addr, env->emergency_signals);
+#ifndef CONFIG_USER_ONLY
+        MachineState *ms = MACHINE(qdev_get_machine());
+        unsigned int max_cpus = ms->smp.max_cpus;
+#endif
         if (bitmap_empty(env->emergency_signals, max_cpus)) {
             env->pending_int &= ~INTERRUPT_EMERGENCY_SIGNAL;
         }
@@ -390,8 +410,8 @@ static int mchk_store_vregs(CPUS390XState *env, uint64_t mcesao)
     }
 
     for (i = 0; i < 32; i++) {
-        sa->vregs[i][0] = cpu_to_be64(env->vregs[i][0].ll);
-        sa->vregs[i][1] = cpu_to_be64(env->vregs[i][1].ll);
+        sa->vregs[i][0] = cpu_to_be64(env->vregs[i][0]);
+        sa->vregs[i][1] = cpu_to_be64(env->vregs[i][1]);
     }
 
     cpu_physical_memory_unmap(sa, len, 1, len);
@@ -429,7 +449,7 @@ static void do_mchk_interrupt(CPUS390XState *env)
     lowcore->ar_access_id = 1;
 
     for (i = 0; i < 16; i++) {
-        lowcore->floating_pt_save_area[i] = cpu_to_be64(get_freg(env, i)->ll);
+        lowcore->floating_pt_save_area[i] = cpu_to_be64(*get_freg(env, i));
         lowcore->gpregs_save_area[i] = cpu_to_be64(env->regs[i]);
         lowcore->access_regs_save_area[i] = cpu_to_be32(env->aregs[i]);
         lowcore->cregs_save_area[i] = cpu_to_be64(env->cregs[i]);

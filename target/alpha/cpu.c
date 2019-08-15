@@ -23,7 +23,6 @@
 #include "qapi/error.h"
 #include "qemu/qemu-print.h"
 #include "cpu.h"
-#include "qemu-common.h"
 #include "exec/exec-all.h"
 
 
@@ -191,11 +190,10 @@ static void ev67_cpu_initfn(Object *obj)
 
 static void alpha_cpu_initfn(Object *obj)
 {
-    CPUState *cs = CPU(obj);
     AlphaCPU *cpu = ALPHA_CPU(obj);
     CPUAlphaState *env = &cpu->env;
 
-    cs->env_ptr = env;
+    cpu_set_cpustate_pointers(cpu);
 
     env->lock_addr = -1;
 #if defined(CONFIG_USER_ONLY)

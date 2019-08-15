@@ -22,15 +22,8 @@
 #include <sys/resource.h>
 
 #include "qemu.h"
-#include "qemu-common.h"
 #include "trace.h"
 #include "signal-common.h"
-
-struct target_sigaltstack target_sigaltstack_used = {
-    .ss_sp = 0,
-    .ss_size = 0,
-    .ss_flags = TARGET_SS_DISABLE,
-};
 
 static struct target_sigaction sigact_table[TARGET_NSIG];
 
@@ -252,13 +245,17 @@ void set_sigmask(const sigset_t *set)
 
 int on_sig_stack(unsigned long sp)
 {
-    return (sp - target_sigaltstack_used.ss_sp
-            < target_sigaltstack_used.ss_size);
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
+
+    return (sp - ts->sigaltstack_used.ss_sp
+            < ts->sigaltstack_used.ss_size);
 }
 
 int sas_ss_flags(unsigned long sp)
 {
-    return (target_sigaltstack_used.ss_size == 0 ? SS_DISABLE
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
+
+    return (ts->sigaltstack_used.ss_size == 0 ? SS_DISABLE
             : on_sig_stack(sp) ? SS_ONSTACK : 0);
 }
 
@@ -267,17 +264,21 @@ abi_ulong target_sigsp(abi_ulong sp, struct target_sigaction *ka)
     /*
      * This is the X/Open sanctioned signal stack switching.
      */
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
+
     if ((ka->sa_flags & TARGET_SA_ONSTACK) && !sas_ss_flags(sp)) {
-        return target_sigaltstack_used.ss_sp + target_sigaltstack_used.ss_size;
+        return ts->sigaltstack_used.ss_sp + ts->sigaltstack_used.ss_size;
     }
     return sp;
 }
 
 void target_save_altstack(target_stack_t *uss, CPUArchState *env)
 {
-    __put_user(target_sigaltstack_used.ss_sp, &uss->ss_sp);
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
+
+    __put_user(ts->sigaltstack_used.ss_sp, &uss->ss_sp);
     __put_user(sas_ss_flags(get_sp_from_cpustate(env)), &uss->ss_flags);
-    __put_user(target_sigaltstack_used.ss_size, &uss->ss_size);
+    __put_user(ts->sigaltstack_used.ss_size, &uss->ss_size);
 }
 
 /* siginfo conversion */
@@ -626,7 +627,7 @@ static void QEMU_NORETURN dump_core_and_abort(int target_sig)
 int queue_signal(CPUArchState *env, int sig, int si_type,
                  target_siginfo_t *info)
 {
-    CPUState *cpu = ENV_GET_CPU(env);
+    CPUState *cpu = env_cpu(env);
     TaskState *ts = cpu->opaque;
 
     trace_user_queue_signal(env, sig);
@@ -651,7 +652,7 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
                                 void *puc)
 {
     CPUArchState *env = thread_cpu->env_ptr;
-    CPUState *cpu = ENV_GET_CPU(env);
+    CPUState *cpu = env_cpu(env);
     TaskState *ts = cpu->opaque;
 
     int sig;
@@ -709,12 +710,13 @@ abi_long do_sigaltstack(abi_ulong uss_addr, abi_ulong uoss_addr, abi_ulong sp)
 {
     int ret;
     struct target_sigaltstack oss;
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
 
     /* XXX: test errors */
     if(uoss_addr)
     {
-        __put_user(target_sigaltstack_used.ss_sp, &oss.ss_sp);
-        __put_user(target_sigaltstack_used.ss_size, &oss.ss_size);
+        __put_user(ts->sigaltstack_used.ss_sp, &oss.ss_sp);
+        __put_user(ts->sigaltstack_used.ss_size, &oss.ss_size);
         __put_user(sas_ss_flags(sp), &oss.ss_flags);
     }
 
@@ -761,8 +763,8 @@ abi_long do_sigaltstack(abi_ulong uss_addr, abi_ulong uoss_addr, abi_ulong sp)
             }
         }
 
-        target_sigaltstack_used.ss_sp = ss.ss_sp;
-        target_sigaltstack_used.ss_size = ss.ss_size;
+        ts->sigaltstack_used.ss_sp = ss.ss_sp;
+        ts->sigaltstack_used.ss_size = ss.ss_size;
     }
 
     if (uoss_addr) {
@@ -863,7 +865,7 @@ int do_sigaction(int sig, const struct target_sigaction *act,
 static void handle_pending_signal(CPUArchState *cpu_env, int sig,
                                   struct emulated_sigtable *k)
 {
-    CPUState *cpu = ENV_GET_CPU(cpu_env);
+    CPUState *cpu = env_cpu(cpu_env);
     abi_ulong handler;
     sigset_t set;
     target_sigset_t target_old_set;
@@ -948,7 +950,7 @@ static void handle_pending_signal(CPUArchState *cpu_env, int sig,
 
 void process_pending_signals(CPUArchState *cpu_env)
 {
-    CPUState *cpu = ENV_GET_CPU(cpu_env);
+    CPUState *cpu = env_cpu(cpu_env);
     int sig;
     TaskState *ts = cpu->opaque;
     sigset_t set;

@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 
 #ifndef _WIN32
@@ -33,7 +34,7 @@
 #include <iconv.h>
 
 #include "qapi/error.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "sysemu/sysemu.h"
@@ -489,9 +490,9 @@ static uint16_t get_ucs(wchar_t wch, iconv_t conv)
     memset(&ps, 0, sizeof(ps));
     ret = wcrtomb(mbch, wch, &ps);
     if (ret == -1) {
-        fprintf(stderr, "Could not convert 0x%04x "
+        fprintf(stderr, "Could not convert 0x%04lx "
                         "from wchar_t to a multibyte character: %s\n",
-                        wch, strerror(errno));
+                        (unsigned long)wch, strerror(errno));
         return 0xFFFD;
     }
 
@@ -501,9 +502,9 @@ static uint16_t get_ucs(wchar_t wch, iconv_t conv)
     such = sizeof(uch);
 
     if (iconv(conv, &pmbch, &smbch, &puch, &such) == (size_t) -1) {
-        fprintf(stderr, "Could not convert 0x%04x "
+        fprintf(stderr, "Could not convert 0x%04lx "
                         "from a multibyte character to UCS-2 : %s\n",
-                        wch, strerror(errno));
+                        (unsigned long)wch, strerror(errno));
         return 0xFFFD;
     }
 

@@ -72,10 +72,16 @@ static void kvm_cpu_disable_all(void)
  * XIVE Thread Interrupt Management context (KVM)
  */
 
-static void kvmppc_xive_cpu_set_state(XiveTCTX *tctx, Error **errp)
+void kvmppc_xive_cpu_set_state(XiveTCTX *tctx, Error **errp)
 {
+    SpaprXive *xive = SPAPR_MACHINE(qdev_get_machine())->xive;
     uint64_t state[2];
     int ret;
+
+    /* The KVM XIVE device is not in use yet */
+    if (xive->fd == -1) {
+        return;
+    }
 
     /* word0 and word1 of the OS ring. */
     state[0] = *((uint64_t *) &tctx->regs[TM_QW1_OS]);
@@ -655,7 +661,16 @@ int kvmppc_xive_post_load(SpaprXive *xive, int version_id)
         }
     }
 
-    /* Restore the thread interrupt contexts */
+    /*
+     * Restore the thread interrupt contexts of initial CPUs.
+     *
+     * The context of hotplugged CPUs is restored later, by the
+     * 'post_load' handler of the XiveTCTX model because they are not
+     * available at the time the SpaprXive 'post_load' method is
+     * called. We can not restore the context of all CPUs in the
+     * 'post_load' handler of XiveTCTX because the machine is not
+     * necessarily connected to the KVM device at that time.
+     */
     CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
 
@@ -724,12 +739,13 @@ void kvmppc_xive_connect(SpaprXive *xive, Error **errp)
     xsrc->esb_mmap = kvmppc_xive_mmap(xive, KVM_XIVE_ESB_PAGE_OFFSET, esb_len,
                                       &local_err);
     if (local_err) {
-        error_propagate(errp, local_err);
-        return;
+        goto fail;
     }
 
-    memory_region_init_ram_device_ptr(&xsrc->esb_mmio, OBJECT(xsrc),
+    memory_region_init_ram_device_ptr(&xsrc->esb_mmio_kvm, OBJECT(xsrc),
                                       "xive.esb", esb_len, xsrc->esb_mmap);
+    memory_region_add_subregion_overlap(&xsrc->esb_mmio, 0,
+                                        &xsrc->esb_mmio_kvm, 1);
 
     /*
      * 2. END ESB pages (No KVM support yet)
@@ -741,11 +757,12 @@ void kvmppc_xive_connect(SpaprXive *xive, Error **errp)
     xive->tm_mmap = kvmppc_xive_mmap(xive, KVM_XIVE_TIMA_PAGE_OFFSET, tima_len,
                                      &local_err);
     if (local_err) {
-        error_propagate(errp, local_err);
-        return;
+        goto fail;
     }
-    memory_region_init_ram_device_ptr(&xive->tm_mmio, OBJECT(xive),
+    memory_region_init_ram_device_ptr(&xive->tm_mmio_kvm, OBJECT(xive),
                                       "xive.tima", tima_len, xive->tm_mmap);
+    memory_region_add_subregion_overlap(&xive->tm_mmio, 0,
+                                        &xive->tm_mmio_kvm, 1);
 
     xive->change = qemu_add_vm_change_state_handler(
         kvmppc_xive_change_state_handler, xive);
@@ -756,24 +773,24 @@ void kvmppc_xive_connect(SpaprXive *xive, Error **errp)
 
         kvmppc_xive_cpu_connect(spapr_cpu_state(cpu)->tctx, &local_err);
         if (local_err) {
-            error_propagate(errp, local_err);
-            return;
+            goto fail;
         }
     }
 
     /* Update the KVM sources */
     kvmppc_xive_source_reset(xsrc, &local_err);
     if (local_err) {
-            error_propagate(errp, local_err);
-            return;
+        goto fail;
     }
 
     kvm_kernel_irqchip = true;
     kvm_msi_via_irqfd_allowed = true;
     kvm_gsi_direct_mapping = true;
+    return;
 
-    /* Map all regions */
-    spapr_xive_map_mmio(xive);
+fail:
+    error_propagate(errp, local_err);
+    kvmppc_xive_disconnect(xive, NULL);
 }
 
 void kvmppc_xive_disconnect(SpaprXive *xive, Error **errp)
@@ -795,21 +812,29 @@ void kvmppc_xive_disconnect(SpaprXive *xive, Error **errp)
     xsrc = &xive->source;
     esb_len = (1ull << xsrc->esb_shift) * xsrc->nr_irqs;
 
-    sysbus_mmio_unmap(SYS_BUS_DEVICE(xive), 0);
-    munmap(xsrc->esb_mmap, esb_len);
+    if (xsrc->esb_mmap) {
+        memory_region_del_subregion(&xsrc->esb_mmio, &xsrc->esb_mmio_kvm);
+        object_unparent(OBJECT(&xsrc->esb_mmio_kvm));
+        munmap(xsrc->esb_mmap, esb_len);
+        xsrc->esb_mmap = NULL;
+    }
 
-    sysbus_mmio_unmap(SYS_BUS_DEVICE(xive), 1);
-
-    sysbus_mmio_unmap(SYS_BUS_DEVICE(xive), 2);
-    munmap(xive->tm_mmap, 4ull << TM_SHIFT);
+    if (xive->tm_mmap) {
+        memory_region_del_subregion(&xive->tm_mmio, &xive->tm_mmio_kvm);
+        object_unparent(OBJECT(&xive->tm_mmio_kvm));
+        munmap(xive->tm_mmap, 4ull << TM_SHIFT);
+        xive->tm_mmap = NULL;
+    }
 
     /*
      * When the KVM device fd is closed, the KVM device is destroyed
      * and removed from the list of devices of the VM. The VCPU
      * presenters are also detached from the device.
      */
-    close(xive->fd);
-    xive->fd = -1;
+    if (xive->fd != -1) {
+        close(xive->fd);
+        xive->fd = -1;
+    }
 
     kvm_kernel_irqchip = false;
     kvm_msi_via_irqfd_allowed = false;
@@ -819,5 +844,8 @@ void kvmppc_xive_disconnect(SpaprXive *xive, Error **errp)
     kvm_cpu_disable_all();
 
     /* VM Change state handler is not needed anymore */
-    qemu_del_vm_change_state_handler(xive->change);
+    if (xive->change) {
+        qemu_del_vm_change_state_handler(xive->change);
+        xive->change = NULL;
+    }
 }

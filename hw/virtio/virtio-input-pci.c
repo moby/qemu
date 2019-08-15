@@ -10,6 +10,7 @@
 
 #include "virtio-pci.h"
 #include "hw/virtio/virtio-input.h"
+#include "qemu/module.h"
 
 typedef struct VirtIOInputPCI VirtIOInputPCI;
 typedef struct VirtIOInputHIDPCI VirtIOInputHIDPCI;
@@ -48,9 +49,7 @@ static void virtio_input_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
     DeviceState *vdev = DEVICE(&vinput->vdev);
 
     qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
-    if (!virtio_pci_force_virtio_1(vpci_dev, errp)) {
-        return;
-    }
+    virtio_pci_force_virtio_1(vpci_dev);
     object_property_set_bool(OBJECT(vdev), true, "realized", errp);
 }
 
