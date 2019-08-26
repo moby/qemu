@@ -20,12 +20,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "qemu/timer.h"
 #include "qemu/module.h"
 #include "qemu/queue.h"
 #include "hw/usb.h"
+#include "migration/vmstate.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "trace.h"
@@ -2541,6 +2542,9 @@ static void xhci_process_commands(XHCIState *xhci)
             break;
         case CR_GET_PORT_BANDWIDTH:
             event.ccode = xhci_get_port_bandwidth(xhci, trb.parameter);
+            break;
+        case CR_NOOP:
+            event.ccode = CC_SUCCESS;
             break;
         case CR_VENDOR_NEC_FIRMWARE_REVISION:
             if (xhci->nec_quirks) {

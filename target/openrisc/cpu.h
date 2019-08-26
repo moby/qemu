@@ -21,7 +21,7 @@
 #define OPENRISC_CPU_H
 
 #include "exec/cpu-defs.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 /* cpu_openrisc_map_address_* in CPUOpenRISCTLBContext need this decl.  */
 struct OpenRISCCPU;
@@ -333,7 +333,7 @@ int print_insn_or1k(bfd_vma addr, disassemble_info *info);
 #define cpu_signal_handler cpu_openrisc_signal_handler
 
 #ifndef CONFIG_USER_ONLY
-extern const struct VMStateDescription vmstate_openrisc_cpu;
+extern const VMStateDescription vmstate_openrisc_cpu;
 
 /* hw/openrisc_pic.c */
 void cpu_openrisc_pic_init(OpenRISCCPU *cpu);

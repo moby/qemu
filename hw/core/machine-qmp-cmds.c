@@ -13,9 +13,11 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qmp/qerror.h"
+#include "qemu/main-loop.h"
 #include "sysemu/hostmem.h"
 #include "sysemu/hw_accel.h"
 #include "sysemu/numa.h"
+#include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
 
 CpuInfoList *qmp_query_cpus(Error **errp)
@@ -245,6 +247,16 @@ CurrentMachineParams *qmp_query_current_machine(Error **errp)
     params->wakeup_suspend_support = qemu_wakeup_suspend_enabled();
 
     return params;
+}
+
+TargetInfo *qmp_query_target(Error **errp)
+{
+    TargetInfo *info = g_malloc0(sizeof(*info));
+
+    info->arch = qapi_enum_parse(&SysEmuTarget_lookup, TARGET_NAME, -1,
+                                 &error_abort);
+
+    return info;
 }
 
 HotpluggableCPUList *qmp_query_hotpluggable_cpus(Error **errp)

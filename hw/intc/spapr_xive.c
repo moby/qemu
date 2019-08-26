@@ -14,6 +14,8 @@
 #include "qemu/error-report.h"
 #include "target/ppc/cpu.h"
 #include "sysemu/cpus.h"
+#include "sysemu/reset.h"
+#include "migration/vmstate.h"
 #include "monitor/monitor.h"
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/spapr.h"
@@ -21,6 +23,7 @@
 #include "hw/ppc/spapr_xive.h"
 #include "hw/ppc/xive.h"
 #include "hw/ppc/xive_regs.h"
+#include "hw/qdev-properties.h"
 
 /*
  * XIVE Virtualization Controller BAR and Thread Managment BAR that we
@@ -143,7 +146,6 @@ static void spapr_xive_end_pic_print_info(SpaprXive *xive, XiveEND *end,
                    priority, qindex, qentries, qaddr_base, qgen);
 
     xive_end_queue_pic_print_info(end, 6, mon);
-    monitor_printf(mon, "]");
 }
 
 void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
@@ -534,7 +536,10 @@ bool spapr_xive_irq_claim(SpaprXive *xive, uint32_t lisn, bool lsi)
         return false;
     }
 
-    xive->eat[lisn].w |= cpu_to_be64(EAS_VALID);
+    /*
+     * Set default values when allocating an IRQ number
+     */
+    xive->eat[lisn].w |= cpu_to_be64(EAS_VALID | EAS_MASKED);
     if (lsi) {
         xive_source_irq_set_lsi(xsrc, lisn);
     }

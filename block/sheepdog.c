@@ -22,6 +22,7 @@
 #include "qapi/qobject-output-visitor.h"
 #include "qemu/uri.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/sockets.h"
@@ -3228,6 +3229,7 @@ static BlockDriver bdrv_sheepdog = {
     .bdrv_co_create               = sd_co_create,
     .bdrv_co_create_opts          = sd_co_create_opts,
     .bdrv_has_zero_init           = bdrv_has_zero_init_1,
+    .bdrv_has_zero_init_truncate  = bdrv_has_zero_init_1,
     .bdrv_getlength               = sd_getlength,
     .bdrv_get_allocated_file_size = sd_get_allocated_file_size,
     .bdrv_co_truncate             = sd_co_truncate,

@@ -34,6 +34,7 @@
 #include "qemu/option.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
+#include "hw/boards.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/primecell.h"
 #include "hw/arm/virt.h"
@@ -44,6 +45,7 @@
 #include "net/net.h"
 #include "sysemu/device_tree.h"
 #include "sysemu/numa.h"
+#include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/kvm.h"
 #include "hw/loader.h"
@@ -54,9 +56,11 @@
 #include "hw/pci-host/gpex.h"
 #include "hw/arm/sysbus-fdt.h"
 #include "hw/platform-bus.h"
+#include "hw/qdev-properties.h"
 #include "hw/arm/fdt.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/intc/arm_gicv3_common.h"
+#include "hw/irq.h"
 #include "kvm_arm.h"
 #include "hw/firmware/smbios.h"
 #include "qapi/visitor.h"
@@ -2046,10 +2050,17 @@ static void machvirt_machine_init(void)
 }
 type_init(machvirt_machine_init);
 
-static void virt_machine_4_1_options(MachineClass *mc)
+static void virt_machine_4_2_options(MachineClass *mc)
 {
 }
-DEFINE_VIRT_MACHINE_AS_LATEST(4, 1)
+DEFINE_VIRT_MACHINE_AS_LATEST(4, 2)
+
+static void virt_machine_4_1_options(MachineClass *mc)
+{
+    virt_machine_4_2_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_4_1, hw_compat_4_1_len);
+}
+DEFINE_VIRT_MACHINE(4, 1)
 
 static void virt_machine_4_0_options(MachineClass *mc)
 {

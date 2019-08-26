@@ -27,7 +27,7 @@
 #include "qemu/bitmap.h"
 #include "qemu/error-report.h"
 #include "hw/pci/pci.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 #include "target/i386/cpu.h"
 #include "hw/misc/pvpanic.h"
 #include "hw/timer/hpet.h"
@@ -46,8 +46,10 @@
 #include "hw/boards.h"
 #include "sysemu/tpm_backend.h"
 #include "hw/timer/mc146818rtc_regs.h"
+#include "migration/vmstate.h"
 #include "hw/mem/memory-device.h"
 #include "sysemu/numa.h"
+#include "sysemu/reset.h"
 
 /* Supported chipsets: */
 #include "hw/acpi/piix4.h"

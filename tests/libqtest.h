@@ -262,6 +262,8 @@ char *qtest_hmp(QTestState *s, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
 char *qtest_vhmp(QTestState *s, const char *fmt, va_list ap)
     GCC_FMT_ATTR(2, 0);
 
+void qtest_module_load(QTestState *s, const char *prefix, const char *libname);
+
 /**
  * qtest_get_irq:
  * @s: #QTestState instance to operate on.
@@ -666,7 +668,8 @@ static inline void qtest_end(void)
 QDict *qmp(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
 
 /**
- * qmp_assert_success:
+ * qtest_qmp_assert_success:
+ * @qts: QTestState instance to operate on
  * @fmt...: QMP message to send to qemu, formatted like
  * qobject_from_jsonf_nofail().  See parse_escape() for what's
  * supported after '%'.
@@ -674,7 +677,8 @@ QDict *qmp(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
  * Sends a QMP message to QEMU and asserts that a 'return' key is present in
  * the response.
  */
-void qmp_assert_success(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
+void qtest_qmp_assert_success(QTestState *qts, const char *fmt, ...)
+    GCC_FMT_ATTR(2, 3);
 
 /*
  * qmp_eventwait:
@@ -686,16 +690,6 @@ static inline void qmp_eventwait(const char *event)
 {
     return qtest_qmp_eventwait(global_qtest, event);
 }
-
-/**
- * hmp:
- * @fmt...: HMP command to send to QEMU, formats arguments like sprintf().
- *
- * Send HMP command to QEMU via QMP's human-monitor-command.
- *
- * Returns: the command's output.  The caller should g_free() it.
- */
-char *hmp(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
 
 /**
  * get_irq:
@@ -956,6 +950,7 @@ void qtest_cb_for_every_machine(void (*cb)(const char *machine),
 
 /**
  * qtest_qmp_device_add:
+ * @qts: QTestState instance to operate on
  * @driver: Name of the device that should be added
  * @id: Identification string
  * @fmt...: QMP message to send to qemu, formatted like
@@ -964,16 +959,17 @@ void qtest_cb_for_every_machine(void (*cb)(const char *machine),
  *
  * Generic hot-plugging test via the device_add QMP command.
  */
-void qtest_qmp_device_add(const char *driver, const char *id, const char *fmt,
-                          ...) GCC_FMT_ATTR(3, 4);
+void qtest_qmp_device_add(QTestState *qts, const char *driver, const char *id,
+                          const char *fmt, ...) GCC_FMT_ATTR(4, 5);
 
 /**
  * qtest_qmp_device_del:
+ * @qts: QTestState instance to operate on
  * @id: Identification string
  *
  * Generic hot-unplugging test via the device_del QMP command.
  */
-void qtest_qmp_device_del(const char *id);
+void qtest_qmp_device_del(QTestState *qts, const char *id);
 
 /**
  * qmp_rsp_is_err:

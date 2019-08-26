@@ -31,9 +31,10 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "hw/qdev-properties.h"
 #include "hw/usb.h"
+#include "migration/vmstate.h"
 #include "desc.h"
-#include "hw/hw.h"
 #include "audio/audio.h"
 
 #define USBAUDIO_VENDOR_NUM     0x46f4 /* CRC16() of "QEMU" */
@@ -666,6 +667,7 @@ static const VMStateDescription vmstate_usb_audio = {
 };
 
 static Property usb_audio_properties[] = {
+    DEFINE_AUDIO_PROPERTIES(USBAudioState, card),
     DEFINE_PROP_UINT32("debug", USBAudioState, debug, 0),
     DEFINE_PROP_UINT32("buffer", USBAudioState, buffer,
                        32 * USBAUDIO_PACKET_SIZE),

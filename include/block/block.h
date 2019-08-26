@@ -2,7 +2,6 @@
 #define BLOCK_H
 
 #include "block/aio.h"
-#include "qapi/qapi-types-block-core.h"
 #include "block/aio-wait.h"
 #include "qemu/iov.h"
 #include "qemu/coroutine.h"
@@ -88,8 +87,14 @@ typedef enum {
      * fallback. */
     BDRV_REQ_NO_FALLBACK        = 0x100,
 
+    /*
+     * BDRV_REQ_PREFETCH may be used only together with BDRV_REQ_COPY_ON_READ
+     * on read request and means that caller doesn't really need data to be
+     * written to qiov parameter which may be NULL.
+     */
+    BDRV_REQ_PREFETCH  = 0x200,
     /* Mask of valid flags */
-    BDRV_REQ_MASK               = 0x1ff,
+    BDRV_REQ_MASK               = 0x3ff,
 } BdrvRequestFlags;
 
 typedef struct BlockSizes {
@@ -438,6 +443,7 @@ int bdrv_pdiscard(BdrvChild *child, int64_t offset, int64_t bytes);
 int bdrv_co_pdiscard(BdrvChild *child, int64_t offset, int64_t bytes);
 int bdrv_has_zero_init_1(BlockDriverState *bs);
 int bdrv_has_zero_init(BlockDriverState *bs);
+int bdrv_has_zero_init_truncate(BlockDriverState *bs);
 bool bdrv_unallocated_blocks_are_zero(BlockDriverState *bs);
 bool bdrv_can_write_zeroes_with_unmap(BlockDriverState *bs);
 int bdrv_block_status(BlockDriverState *bs, int64_t offset,

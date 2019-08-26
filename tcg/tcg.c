@@ -42,7 +42,6 @@
 #define NO_CPU_IO_DEFS
 #include "cpu.h"
 
-#include "exec/cpu-common.h"
 #include "exec/exec-all.h"
 
 #if !defined(CONFIG_USER_ONLY)
@@ -1926,7 +1925,7 @@ static const char * const ldst_name[] =
 };
 
 static const char * const alignment_name[(MO_AMASK >> MO_ASHIFT) + 1] = {
-#ifdef ALIGNED_ONLY
+#ifdef TARGET_ALIGNED_ONLY
     [MO_UNALN >> MO_ASHIFT]    = "un+",
     [MO_ALIGN >> MO_ASHIFT]    = "",
 #else

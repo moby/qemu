@@ -25,11 +25,14 @@
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/units.h"
+#include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu-version.h"
 #include "qemu/cutils.h"
 #include "qemu/help_option.h"
 #include "qemu/uuid.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "sysemu/seccomp.h"
 #include "sysemu/tcg.h"
 
@@ -54,7 +57,6 @@ int main(int argc, char **argv)
 
 #include "qemu/error-report.h"
 #include "qemu/sockets.h"
-#include "hw/hw.h"
 #include "sysemu/accel.h"
 #include "hw/usb.h"
 #include "hw/isa/isa.h"
@@ -65,7 +67,6 @@ int main(int argc, char **argv)
 #include "hw/firmware/smbios.h"
 #include "hw/acpi/acpi.h"
 #include "hw/xen/xen.h"
-#include "hw/qdev.h"
 #include "hw/loader.h"
 #include "monitor/qdev.h"
 #include "sysemu/bt.h"
@@ -771,7 +772,7 @@ static time_t qemu_ref_timedate(QEMUClockType clock)
     switch (clock) {
     case QEMU_CLOCK_REALTIME:
         value -= rtc_realtime_clock_offset;
-        /* no break */
+        /* fall through */
     case QEMU_CLOCK_VIRTUAL:
         value += rtc_ref_start_datetime;
         break;
@@ -1362,14 +1363,14 @@ static int machine_help_func(QemuOpts *opts, MachineState *machine)
     return 1;
 }
 
-struct vm_change_state_entry {
+struct VMChangeStateEntry {
     VMChangeStateHandler *cb;
     void *opaque;
-    QTAILQ_ENTRY(vm_change_state_entry) entries;
+    QTAILQ_ENTRY(VMChangeStateEntry) entries;
     int priority;
 };
 
-static QTAILQ_HEAD(, vm_change_state_entry) vm_change_state_head;
+static QTAILQ_HEAD(, VMChangeStateEntry) vm_change_state_head;
 
 /**
  * qemu_add_vm_change_state_handler_prio:
@@ -1554,6 +1555,20 @@ void qemu_system_reset(ShutdownCause reason)
         qapi_event_send_reset(shutdown_caused_by_guest(reason), reason);
     }
     cpu_synchronize_all_post_reset();
+}
+
+/*
+ * Wake the VM after suspend.
+ */
+static void qemu_system_wakeup(void)
+{
+    MachineClass *mc;
+
+    mc = current_machine ? MACHINE_GET_CLASS(current_machine) : NULL;
+
+    if (mc && mc->wakeup) {
+        mc->wakeup(current_machine);
+    }
 }
 
 void qemu_system_guest_panicked(GuestPanicInformation *info)
@@ -1764,7 +1779,7 @@ static bool main_loop_should_exit(void)
     }
     if (qemu_wakeup_requested()) {
         pause_all_vcpus();
-        qemu_system_reset(SHUTDOWN_CAUSE_NONE);
+        qemu_system_wakeup();
         notifier_list_notify(&wakeup_notifiers, &wakeup_reason);
         wakeup_reason = QEMU_WAKEUP_REASON_NONE;
         resume_all_vcpus();
@@ -4197,7 +4212,7 @@ int main(int argc, char **argv, char **envp)
     migration_object_init();
 
     if (qtest_chrdev) {
-        qtest_init(qtest_chrdev, qtest_log, &error_fatal);
+        qtest_server_init(qtest_chrdev, qtest_log, &error_fatal);
     }
 
     machine_opts = qemu_get_machine_opts();

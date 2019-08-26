@@ -5,8 +5,6 @@
 #include "cpu-qom.h"
 #include "exec/cpu-defs.h"
 
-#define ALIGNED_ONLY
-
 #if !defined(TARGET_SPARC64)
 #define TARGET_DPREGS 16
 #else
@@ -532,7 +530,7 @@ struct SPARCCPU {
 
 
 #ifndef CONFIG_USER_ONLY
-extern const struct VMStateDescription vmstate_sparc_cpu;
+extern const VMStateDescription vmstate_sparc_cpu;
 #endif
 
 void sparc_cpu_do_interrupt(CPUState *cpu);

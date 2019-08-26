@@ -14,6 +14,7 @@
 #include "target/ppc/cpu.h"
 #include "sysemu/cpus.h"
 #include "sysemu/dma.h"
+#include "sysemu/reset.h"
 #include "monitor/monitor.h"
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/pnv.h"
@@ -21,6 +22,7 @@
 #include "hw/ppc/pnv_xscom.h"
 #include "hw/ppc/pnv_xive.h"
 #include "hw/ppc/xive_regs.h"
+#include "hw/qdev-properties.h"
 #include "hw/ppc/ppc.h"
 
 #include <libfdt.h>
@@ -1592,6 +1594,15 @@ void pnv_xive_pic_print_info(PnvXive *xive, Monitor *mon)
             break;
         }
         xive_end_pic_print_info(&end, i, mon);
+    }
+
+    monitor_printf(mon, "XIVE[%x] END Escalation %08x .. %08x\n", blk, 0,
+                   nr_ends - 1);
+    for (i = 0; i < nr_ends; i++) {
+        if (xive_router_get_end(xrtr, blk, i, &end)) {
+            break;
+        }
+        xive_end_eas_pic_print_info(&end, i, mon);
     }
 }
 

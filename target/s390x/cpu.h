@@ -163,7 +163,7 @@ struct S390CPU {
 
 
 #ifndef CONFIG_USER_ONLY
-extern const struct VMStateDescription vmstate_s390_cpu;
+extern const VMStateDescription vmstate_s390_cpu;
 #endif
 
 /* distinguish between 24 bit and 31 bit addressing */
@@ -330,6 +330,13 @@ static inline int cpu_mmu_index(CPUS390XState *env, bool ifetch)
 {
     if (!(env->psw.mask & PSW_MASK_DAT)) {
         return MMU_REAL_IDX;
+    }
+
+    if (ifetch) {
+        if ((env->psw.mask & PSW_MASK_ASC) == PSW_ASC_HOME) {
+            return MMU_HOME_IDX;
+        }
+        return MMU_PRIMARY_IDX;
     }
 
     switch (env->psw.mask & PSW_MASK_ASC) {

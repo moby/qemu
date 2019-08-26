@@ -26,7 +26,6 @@
 #include "config-devices.h"
 
 #include "qemu/units.h"
-#include "hw/hw.h"
 #include "hw/loader.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/apic.h"
@@ -36,8 +35,8 @@
 #include "hw/pci/pci_ids.h"
 #include "hw/usb.h"
 #include "net/net.h"
-#include "hw/boards.h"
 #include "hw/ide.h"
+#include "hw/irq.h"
 #include "sysemu/kvm.h"
 #include "hw/kvm/clock.h"
 #include "sysemu/sysemu.h"
@@ -313,7 +312,7 @@ else {
  * pc_compat_*() functions that run on machine-init time and
  * change global QEMU state are deprecated. Please don't create
  * one, and implement any pc-*-2.4 (and newer) compat code in
- * HW_COMPAT_*, PC_COMPAT_*, or * pc_*_machine_options().
+ * hw_compat_*, pc_compat_*, or * pc_*_machine_options().
  */
 
 static void pc_compat_2_3_fn(MachineState *machine)
@@ -433,13 +432,25 @@ static void pc_i440fx_machine_options(MachineClass *m)
     machine_class_allow_dynamic_sysbus_dev(m, TYPE_RAMFB_DEVICE);
 }
 
-static void pc_i440fx_4_1_machine_options(MachineClass *m)
+static void pc_i440fx_4_2_machine_options(MachineClass *m)
 {
     PCMachineClass *pcmc = PC_MACHINE_CLASS(m);
     pc_i440fx_machine_options(m);
     m->alias = "pc";
     m->is_default = 1;
     pcmc->default_cpu_version = 1;
+}
+
+DEFINE_I440FX_MACHINE(v4_2, "pc-i440fx-4.2", NULL,
+                      pc_i440fx_4_2_machine_options);
+
+static void pc_i440fx_4_1_machine_options(MachineClass *m)
+{
+    pc_i440fx_4_2_machine_options(m);
+    m->alias = NULL;
+    m->is_default = 0;
+    compat_props_add(m->compat_props, hw_compat_4_1, hw_compat_4_1_len);
+    compat_props_add(m->compat_props, pc_compat_4_1, pc_compat_4_1_len);
 }
 
 DEFINE_I440FX_MACHINE(v4_1, "pc-i440fx-4.1", NULL,

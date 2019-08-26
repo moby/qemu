@@ -3,13 +3,13 @@
 #ifndef HW_BOARDS_H
 #define HW_BOARDS_H
 
+#include "exec/memory.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/accel.h"
-#include "hw/qdev.h"
 #include "qapi/qapi-types-machine.h"
 #include "qemu/module.h"
 #include "qom/object.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 /**
  * memory_region_allocate_system_memory - Allocate a board's main memory
@@ -86,7 +86,7 @@ void machine_class_allow_dynamic_sysbus_dev(MachineClass *mc, const char *type);
  * @props - CPU object properties, initialized by board
  * #vcpus_count - number of threads provided by @cpu object
  */
-typedef struct {
+typedef struct CPUArchId {
     uint64_t arch_id;
     int64_t vcpus_count;
     CpuInstanceProperties props;
@@ -180,6 +180,7 @@ struct MachineClass {
 
     void (*init)(MachineState *state);
     void (*reset)(MachineState *state);
+    void (*wakeup)(MachineState *state);
     void (*hot_add_cpu)(MachineState *state, const int64_t id, Error **errp);
     int (*kvm_type)(MachineState *machine, const char *arg);
     void (*smp_parse)(MachineState *ms, QemuOpts *opts);
@@ -316,6 +317,9 @@ struct MachineState {
         type_register_static(&machine_initfn##_typeinfo); \
     } \
     type_init(machine_initfn##_register_types)
+
+extern GlobalProperty hw_compat_4_1[];
+extern const size_t hw_compat_4_1_len;
 
 extern GlobalProperty hw_compat_4_0[];
 extern const size_t hw_compat_4_0_len;

@@ -11,11 +11,13 @@
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "hw/irq.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_cpu_core.h"
 #include "hw/ppc/spapr_xive.h"
 #include "hw/ppc/xics.h"
 #include "hw/ppc/xics_spapr.h"
+#include "hw/qdev-properties.h"
 #include "cpu-models.h"
 #include "sysemu/kvm.h"
 
@@ -55,11 +57,6 @@ int spapr_irq_msi_alloc(SpaprMachineState *spapr, uint32_t num, bool align,
 void spapr_irq_msi_free(SpaprMachineState *spapr, int irq, uint32_t num)
 {
     bitmap_clear(spapr->irq_map, irq - SPAPR_IRQ_MSI, num);
-}
-
-void spapr_irq_msi_reset(SpaprMachineState *spapr)
-{
-    bitmap_clear(spapr->irq_map, 0, spapr->irq_map_nr);
 }
 
 static void spapr_irq_init_kvm(SpaprMachineState *spapr,
@@ -729,6 +726,8 @@ int spapr_irq_post_load(SpaprMachineState *spapr, int version_id)
 
 void spapr_irq_reset(SpaprMachineState *spapr, Error **errp)
 {
+    assert(!spapr->irq_map || bitmap_empty(spapr->irq_map, spapr->irq_map_nr));
+
     if (spapr->irq->reset) {
         spapr->irq->reset(spapr, errp);
     }

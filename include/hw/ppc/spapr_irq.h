@@ -10,6 +10,8 @@
 #ifndef HW_SPAPR_IRQ_H
 #define HW_SPAPR_IRQ_H
 
+#include "target/ppc/cpu-qom.h"
+
 /*
  * IRQ range offsets per device type
  */
@@ -28,7 +30,6 @@ void spapr_irq_msi_init(SpaprMachineState *spapr, uint32_t nr_msis);
 int spapr_irq_msi_alloc(SpaprMachineState *spapr, uint32_t num, bool align,
                         Error **errp);
 void spapr_irq_msi_free(SpaprMachineState *spapr, int irq, uint32_t num);
-void spapr_irq_msi_reset(SpaprMachineState *spapr);
 
 typedef struct SpaprIrq {
     uint32_t    nr_irqs;

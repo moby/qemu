@@ -26,8 +26,8 @@
 #include "qemu/qemu-print.h"
 #include "hw/s390x/ioinst.h"
 #include "sysemu/hw_accel.h"
+#include "sysemu/runstate.h"
 #ifndef CONFIG_USER_ONLY
-#include "sysemu/sysemu.h"
 #include "sysemu/tcg.h"
 #endif
 
@@ -56,6 +56,11 @@ hwaddr s390_cpu_get_phys_page_debug(CPUState *cs, vaddr vaddr)
     /* 31-Bit mode */
     if (!(env->psw.mask & PSW_MASK_64)) {
         vaddr &= 0x7fffffff;
+    }
+
+    /* We want to read the code (e.g., see what we are single-stepping).*/
+    if (asc != PSW_ASC_HOME) {
+        asc = PSW_ASC_PRIMARY;
     }
 
     if (mmu_translate(env, vaddr, MMU_INST_FETCH, asc, &raddr, &prot, false)) {
