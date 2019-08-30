@@ -22,6 +22,8 @@
  */
 #define SIGSET_T_SIZE (_NSIG / 8)
 
+#define CONFIG_BINFMT_PRESERVE_ARGV0 1
+
 /* This struct is used to hold certain information about the image.
  * Basically, it replicates in user space what would be certain
  * task_struct fields in the kernel

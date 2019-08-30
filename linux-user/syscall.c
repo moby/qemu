@@ -57,6 +57,7 @@
 #include <linux/icmpv6.h>
 #include <linux/errqueue.h>
 #include <linux/random.h>
+#include "qemu-common.h"
 #ifdef CONFIG_TIMERFD
 #include <sys/timerfd.h>
 #endif
@@ -113,6 +114,10 @@
 #include "qapi/error.h"
 #include "fd-trans.h"
 
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+#include <string.h>
+#endif
+
 #ifndef CLONE_IO
 #define CLONE_IO                0x80000000      /* Clone io context */
 #endif
@@ -142,7 +147,7 @@
 /* Flags for fork which we can implement within QEMU itself */
 #define CLONE_OPTIONAL_FORK_FLAGS               \
     (CLONE_SETTLS | CLONE_PARENT_SETTID |       \
-     CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID)
+     CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | CLONE_PARENT)
 
 /* Flags for thread creation which we can implement within QEMU itself */
 #define CLONE_OPTIONAL_THREAD_FLAGS                             \
@@ -317,6 +322,15 @@ _syscall3(int, getrandom, void *, buf, size_t, buflen, unsigned int, flags)
 #if defined(TARGET_NR_kcmp) && defined(__NR_kcmp)
 _syscall5(int, kcmp, pid_t, pid1, pid_t, pid2, int, type,
           unsigned long, idx1, unsigned long, idx2)
+#endif
+
+#if defined(TARGET_NR_pivot_root)
+_syscall2(int, pivot_root, const char *, new_root, const char *, put_old)
+#endif
+
+#if defined(TARGET_NR_keyctl)
+_syscall5(long, keyctl, int, operation, __kernel_ulong_t, arg2,
+          __kernel_ulong_t, arg3, __kernel_ulong_t, arg4, __kernel_ulong_t, arg5)
 #endif
 
 /*
@@ -796,6 +810,7 @@ safe_syscall5(int, mq_timedsend, int, mqdes, const char *, msg_ptr,
 safe_syscall5(int, mq_timedreceive, int, mqdes, char *, msg_ptr,
               size_t, len, unsigned *, prio, const struct timespec *, timeout)
 #endif
+
 /* We do ioctl like this rather than via safe_syscall3 to preserve the
  * "third argument might be integer or pointer or not present" behaviour of
  * the libc function.
@@ -5781,7 +5796,7 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         }
 
         /* We can't support custom termination signals */
-        if ((flags & CSIGNAL) != TARGET_SIGCHLD) {
+        if (flags && ((flags & CSIGNAL) != TARGET_SIGCHLD)) {
             return -TARGET_EINVAL;
         }
 
@@ -5892,6 +5907,16 @@ static int target_to_host_fcntl_cmd(int cmd)
         break;
     case TARGET_F_GETPIPE_SZ:
         ret = F_GETPIPE_SZ;
+        break;
+#endif
+#ifdef F_ADD_SEALS
+    case TARGET_F_ADD_SEALS:
+        ret = F_ADD_SEALS;
+        break;
+#endif
+#ifdef F_GET_SEALS
+    case TARGET_F_GET_SEALS:
+        ret = F_GET_SEALS;
         break;
 #endif
     default:
@@ -6176,7 +6201,17 @@ static abi_long do_fcntl(int fd, int cmd, abi_ulong arg)
     case TARGET_F_GETLEASE:
     case TARGET_F_SETPIPE_SZ:
     case TARGET_F_GETPIPE_SZ:
+    case TARGET_F_ADD_SEALS:
+    //case TARGET_F_GET_SEALS:
         ret = get_errno(safe_fcntl(fd, host_cmd, arg));
+        break;
+
+    case TARGET_F_GET_SEALS:
+        /*
+         * HACK: This is purely used to fakeout runc
+         */
+        #define RUNC_MEMFD_SEALS (F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE)
+        ret = RUNC_MEMFD_SEALS;
         break;
 
     default:
@@ -7495,6 +7530,56 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
             if (!(p = lock_user_string(arg1)))
                 goto execve_efault;
+
+#ifdef CONFIG_BINFMT_PRESERVE_ARGV0
+            /* We need to handle specially the case where the process
+             * tries to exec /proc/self/exe because the latter does not
+             * map to the target process but to QEMU.
+             * Here, we can assume that QEMU was run through binfmt
+             * with the P (preserve argv0) option.
+             *
+             * So we set the execve path to one past the first 0 byte
+             * in cmdline.
+             */
+            if (is_proc_myself(p, "exe")) {
+                int fd = open("/proc/self/cmdline", O_RDONLY);
+                if (fd < 0) {
+                    goto execve_efault_cleanup;
+                } 
+
+                /*
+                 * we assume cmdline fits within buf but also check for cases
+                 * where it doesn't
+                 */
+                char buf[1024];
+                int rc = read(fd, buf, sizeof(buf));
+                if (rc <= 0) {
+                    close(fd);
+                    goto execve_efault_cleanup;
+                }
+
+                /*
+                 * if we can still read from /proc/self/cmdline, it means the
+                 * cmdline was larger than buf so we error out
+                 */
+                uint8_t one;
+                if (read(fd, &one, 1) != 0) {
+                    close(fd);
+                    goto execve_efault_cleanup;
+                }
+                close(fd);
+
+                /*
+                 * buf[rc-1] is guaranteed to be \0 at this point.
+                 */
+                for (int i=0; i < rc-1; i++) {
+                    if (!buf[i]) {
+                        p = &buf[i+1];
+                        break;
+                    }
+                }
+            }
+#endif
             /* Although execve() is not an interruptible syscall it is
              * a special case where we must use the safe_syscall wrapper:
              * if we allow a signal to happen before we make the host
@@ -7509,6 +7594,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             unlock_user(p, arg1, 0);
 
             goto execve_end;
+
+        execve_efault_cleanup:
+            unlock_user(p, arg1, 0);
 
         execve_efault:
             ret = -TARGET_EFAULT;
@@ -7898,6 +7986,20 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(setpgid(arg1, arg2));
     case TARGET_NR_umask:
         return get_errno(umask(arg1));
+    case TARGET_NR_pivot_root:
+	{
+            void *p2;
+            p  = lock_user_string(arg1);
+            p2 = lock_user_string(arg2);
+            if (!p || !p2) {
+                ret = -TARGET_EFAULT;
+            } else {
+                ret = get_errno(pivot_root(p, p2));
+            }
+            unlock_user(p2, arg2, 0);
+            unlock_user(p, arg1, 0);
+        }
+        return ret;
     case TARGET_NR_chroot:
         if (!(p = lock_user_string(arg1)))
             return -TARGET_EFAULT;
@@ -11938,6 +12040,31 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_swapcontext:
         /* PowerPC specific.  */
         return do_swapcontext(cpu_env, arg1, arg2, arg3);
+#endif
+
+#ifdef TARGET_NR_memfd_create
+    case TARGET_NR_memfd_create:
+        {
+            p  = lock_user_string(arg1);
+            if (!p) {
+                ret = -TARGET_EFAULT;
+            } else {
+                ret = get_errno(memfd_create(p, (unsigned int) arg2));
+            }
+            unlock_user(p, arg1, 0);
+        }
+        return ret;
+#endif
+
+#ifdef TARGET_NR_copy_file_range
+    case TARGET_NR_copy_file_range:
+    	// TODO(docker)
+    	return -TARGET_EINVAL;
+#endif
+
+#ifdef TARGET_NR_keyctl
+    case TARGET_NR_keyctl:
+        return get_errno(keyctl(arg1, arg2, arg3, arg4, arg5));
 #endif
 
     default:
