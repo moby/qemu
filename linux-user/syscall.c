@@ -6202,8 +6202,16 @@ static abi_long do_fcntl(int fd, int cmd, abi_ulong arg)
     case TARGET_F_SETPIPE_SZ:
     case TARGET_F_GETPIPE_SZ:
     case TARGET_F_ADD_SEALS:
-    case TARGET_F_GET_SEALS:
+    //case TARGET_F_GET_SEALS:
         ret = get_errno(safe_fcntl(fd, host_cmd, arg));
+        break;
+
+    case TARGET_F_GET_SEALS:
+        /*
+         * HACK: This is purely used to fakeout runc
+         */
+        #define RUNC_MEMFD_SEALS (F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE)
+        ret = RUNC_MEMFD_SEALS;
         break;
 
     default:
